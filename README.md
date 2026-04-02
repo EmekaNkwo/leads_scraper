@@ -2,6 +2,9 @@
 
 Google Maps leads scraper with enrichment, export pipeline, REST API, and React frontend.
 
+![Leads Scraper Dashboard](demo.png)
+
+
 ## Features
 
 - Scrapes leads from Google Maps search queries.
