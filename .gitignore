@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Runtime artifacts
+backend/logs/
+backend/checkpoints/
+logs/
+
+# Generated exports
+backend/csv_exports/*.csv
+backend/csv_exports/*.json
+backend/csv_exports/archive/
+
+# Frontend
+frontend/node_modules/
+frontend/.next/

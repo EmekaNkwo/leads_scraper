@@ -1,0 +1,15 @@
+{
+  "queries": [
+    "electronics store lagos"
+  ],
+  "max_results_per_query": 50,
+  "max_scrolls_per_query": 15,
+  "max_runtime_seconds": 0,
+  "output_dir": "csv_exports",
+  "logs_dir": "logs",
+  "checkpoint_dir": "checkpoints",
+  "archive_after_days": 14,
+  "headless": true,
+  "enrich_websites": true,
+  "export_json": true
+}
