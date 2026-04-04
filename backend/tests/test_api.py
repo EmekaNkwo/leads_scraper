@@ -42,3 +42,50 @@ def test_list_exports_only_returns_csv(tmp_path: Path, monkeypatch):
     assert response.status_code == 200
     data = response.json()
     assert [item["filename"] for item in data] == ["leads_sample.csv"]
+
+
+def test_download_job_csv_uses_query_and_timestamp_filename():
+    client = TestClient(api.app)
+    job = api.JobStatus(
+        job_id="job123",
+        status="completed",
+        created_at="2026-04-04T03:27:42",
+        completed_at="2026-04-04T03:30:48",
+        queries_total=1,
+        queries_done=1,
+        results=[
+            api.QueryResult(
+                query="electronics store lagos",
+                leads_count=1,
+                elapsed_seconds=10.0,
+                csv_path="csv_exports/leads_electronics-store-lagos.csv",
+            )
+        ],
+        leads=[
+            api.LeadOut(
+                query="electronics store lagos",
+                name="Shop",
+                phone="08000000000",
+                address="Somewhere",
+                email="N/A",
+                owner_name="N/A",
+                website="N/A",
+                maps_url="N/A",
+                category="N/A",
+                social_links=[],
+                scraped_at="2026-04-04 03:30:48",
+                confidence_score=0.45,
+            )
+        ],
+        summary={"total_leads": 1},
+    )
+    with api._jobs_lock:
+        api._jobs[job.job_id] = job
+
+    response = client.get(f"/scrape/{job.job_id}/csv")
+
+    assert response.status_code == 200
+    assert (
+        response.headers["content-disposition"]
+        == "attachment; filename=leads_electronics-store-lagos_2026-04-04_03-30-48am.csv"
+    )

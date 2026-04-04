@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import { Play, Spinner } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import {
@@ -14,6 +15,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import type { ScrapeRequest } from "@/types";
 
 interface ScrapeFormProps {
@@ -29,6 +35,15 @@ interface ScrapeFormProps {
   onSubmit: () => void;
 }
 
+const TOGGLE_TOOLTIPS = {
+  headless:
+    "Runs the browser in the background without opening the Google Maps window. Turn this off if you want to watch the scraper work live.",
+  enrich_websites:
+    "Visits each business website after scraping to look for extra details like email addresses or owner hints. This usually improves data quality but makes runs slower.",
+  resume:
+    "Loads saved checkpoint data for the same query so the scraper can continue from earlier progress instead of starting over.",
+} satisfies Record<"headless" | "enrich_websites" | "resume", string>;
+
 export function ScrapeForm({
   form,
   queriesText,
@@ -39,6 +54,30 @@ export function ScrapeForm({
   onSubmit,
 }: ScrapeFormProps) {
   const busy = isSubmitting || isRunning;
+  const recommendedMaxScrolls = useMemo(() => {
+    const results = Math.max(1, form.max_results_per_query || 1);
+    return Math.min(100, Math.max(8, Math.ceil(results / 5)));
+  }, [form.max_results_per_query]);
+
+  const scrollRecommendation = useMemo(() => {
+    const current = form.max_scrolls_per_query || 0;
+    if (current < recommendedMaxScrolls) {
+      return {
+        className: "text-amber-600",
+        message: `Recommended: about ${recommendedMaxScrolls} scrolls for ${form.max_results_per_query} results. Current value may stop early.`,
+      };
+    }
+    if (current > recommendedMaxScrolls + 10) {
+      return {
+        className: "text-muted-foreground",
+        message: `Recommended: about ${recommendedMaxScrolls} scrolls for ${form.max_results_per_query} results. Current value is higher than typical.`,
+      };
+    }
+    return {
+      className: "text-emerald-600",
+      message: `Recommended: about ${recommendedMaxScrolls} scrolls for ${form.max_results_per_query} results. Current value looks reasonable.`,
+    };
+  }, [form.max_results_per_query, form.max_scrolls_per_query, recommendedMaxScrolls]);
 
   return (
     <Card>
@@ -89,6 +128,9 @@ export function ScrapeForm({
               }
               disabled={busy}
             />
+            <p className={`text-xs ${scrollRecommendation.className}`}>
+              {scrollRecommendation.message}
+            </p>
           </div>
         </div>
 
@@ -100,19 +142,23 @@ export function ScrapeForm({
             ["enrich_websites", "Website enrichment"],
             ["resume", "Resume checkpoint"],
           ] as const).map(([key, label]) => (
-            <label
-              key={key}
-              className="flex items-center gap-2 text-sm cursor-pointer"
-            >
-              <Checkbox
-                checked={form[key]}
-                onCheckedChange={(v) =>
-                  onUpdateForm(key, v === true)
-                }
-                disabled={busy}
-              />
-              {label}
-            </label>
+            <Tooltip key={key}>
+              <TooltipTrigger asChild>
+                <label className="flex cursor-pointer items-center gap-2 text-sm">
+                  <Checkbox
+                    checked={form[key]}
+                    onCheckedChange={(v) =>
+                      onUpdateForm(key, v === true)
+                    }
+                    disabled={busy}
+                  />
+                  {label}
+                </label>
+              </TooltipTrigger>
+              <TooltipContent side="top" sideOffset={6}>
+                {TOGGLE_TOOLTIPS[key]}
+              </TooltipContent>
+            </Tooltip>
           ))}
         </div>
 

@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from scraper import run_query
 from scraper_config import AppConfig
 from scraper_models import LeadRecord
-from scraper_utils import setup_logger
+from scraper_utils import setup_logger, slugify
 
 app = FastAPI(
     title="Leads Scraper API",
@@ -384,7 +384,8 @@ def download_job_csv(job_id: str):
     """
     Download all leads from a completed job as a single combined CSV.
     """
-    job = _jobs.get(job_id)
+    with _jobs_lock:
+        job = _jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
     if job.status not in ("completed", "failed"):
@@ -402,10 +403,18 @@ def download_job_csv(job_id: str):
         writer.writerow(row)
 
     buf.seek(0)
+    timestamp_source = job.completed_at or job.created_at
+    try:
+        timestamp = datetime.fromisoformat(timestamp_source).strftime("%Y-%m-%d_%I-%M-%S%p").lower()
+    except ValueError:
+        timestamp = datetime.now().strftime("%Y-%m-%d_%I-%M-%S%p").lower()
+    unique_queries = sorted({result.query for result in job.results if result.query})
+    query_slug = slugify(unique_queries[0]) if len(unique_queries) == 1 else "combined-job"
+    filename = f"leads_{query_slug}_{timestamp}.csv"
     return StreamingResponse(
         iter([buf.getvalue()]),
         media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename=job_{job_id}.csv"},
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
 
 

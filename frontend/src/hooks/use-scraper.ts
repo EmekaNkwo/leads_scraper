@@ -18,6 +18,18 @@ const DEFAULT_FORM: ScrapeRequest = {
   resume: false,
 };
 
+function getJobElapsed(job: JobStatus): number {
+  const startedAt = Date.parse(job.created_at);
+  if (Number.isNaN(startedAt)) {
+    return 0;
+  }
+  const endedAt = job.completed_at ? Date.parse(job.completed_at) : Date.now();
+  if (Number.isNaN(endedAt)) {
+    return 0;
+  }
+  return Math.max(0, Math.floor((endedAt - startedAt) / 1000));
+}
+
 export function useScraper() {
   const [form, setForm] = useState<ScrapeRequest>(DEFAULT_FORM);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -96,7 +108,7 @@ export function useScraper() {
   }, [form, startScrape]);
 
   const viewJob = useCallback((job: JobStatus) => {
-    setElapsed(0);
+    setElapsed(getJobElapsed(job));
     setActiveJobId(job.job_id);
   }, []);
 
