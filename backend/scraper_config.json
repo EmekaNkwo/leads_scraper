@@ -10,6 +10,5 @@
   "checkpoint_dir": "checkpoints",
   "archive_after_days": 14,
   "headless": true,
-  "enrich_websites": true,
-  "export_json": true
+  "enrich_websites": true
 }

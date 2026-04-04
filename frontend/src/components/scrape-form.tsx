@@ -98,7 +98,6 @@ export function ScrapeForm({
           {([
             ["headless", "Headless mode"],
             ["enrich_websites", "Website enrichment"],
-            ["export_json", "Export JSON"],
             ["resume", "Resume checkpoint"],
           ] as const).map(([key, label]) => (
             <label

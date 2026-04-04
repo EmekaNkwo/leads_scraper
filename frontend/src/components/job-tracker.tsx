@@ -58,10 +58,19 @@ export function JobTracker({
 
   const cfg = statusConfig[job.status];
   const Icon = cfg.icon;
-  const progress =
+  const liveProgress = job.progress;
+  const queryProgress =
+    liveProgress && liveProgress.leads_target > 0
+      ? Math.min(
+          100,
+          Math.round((liveProgress.leads_collected / liveProgress.leads_target) * 100),
+        )
+      : 0;
+  const overallProgress =
     job.queries_total > 0
       ? Math.round((job.queries_done / job.queries_total) * 100)
       : 0;
+  const progress = liveProgress?.query ? Math.max(queryProgress, overallProgress) : overallProgress;
 
   return (
     <Card>
@@ -85,7 +94,9 @@ export function JobTracker({
           <div className="flex flex-col gap-2">
             <div className="flex items-center justify-between text-sm">
               <span className="text-muted-foreground">
-                Query {job.queries_done} of {job.queries_total}
+                {liveProgress?.query
+                  ? `${liveProgress.query} · ${liveProgress.leads_collected}/${liveProgress.leads_target} leads`
+                  : `Query ${job.queries_done} of ${job.queries_total}`}
               </span>
               <span className="font-mono text-xs text-muted-foreground">
                 {formatElapsed(elapsed)}
@@ -93,6 +104,58 @@ export function JobTracker({
             </div>
             <Progress value={progress} />
           </div>
+        )}
+
+        {liveProgress && (
+          <>
+            <div className="rounded-md border px-3 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium">
+                    {liveProgress.query ?? "Awaiting query"}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {liveProgress.message ?? "Waiting for progress updates"}
+                  </p>
+                </div>
+                <Badge variant="outline" className="font-mono text-[10px] uppercase">
+                  {liveProgress.phase.replaceAll("_", " ")}
+                </Badge>
+              </div>
+
+              <div className="mt-3 grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">
+                <div className="rounded-md bg-muted/40 px-2 py-2">
+                  <div className="text-muted-foreground">Leads</div>
+                  <div className="font-mono">
+                    {liveProgress.leads_collected}/{liveProgress.leads_target || "?"}
+                  </div>
+                </div>
+                <div className="rounded-md bg-muted/40 px-2 py-2">
+                  <div className="text-muted-foreground">Visible cards</div>
+                  <div className="font-mono">{liveProgress.visible_cards}</div>
+                </div>
+                <div className="rounded-md bg-muted/40 px-2 py-2">
+                  <div className="text-muted-foreground">Scrolls</div>
+                  <div className="font-mono">
+                    {liveProgress.scrolls_used}/{liveProgress.max_scrolls || "?"}
+                  </div>
+                </div>
+                <div className="rounded-md bg-muted/40 px-2 py-2">
+                  <div className="text-muted-foreground">Stale</div>
+                  <div className="font-mono">{liveProgress.stale_scrolls}</div>
+                </div>
+              </div>
+
+              {(liveProgress.end_reason || liveProgress.csv_path) && (
+                <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                  {liveProgress.end_reason && (
+                    <span>End reason: {liveProgress.end_reason.replaceAll("_", " ")}</span>
+                  )}
+                  {liveProgress.csv_path && <span>Latest CSV: {liveProgress.csv_path}</span>}
+                </div>
+              )}
+            </div>
+          </>
         )}
 
         {job.results.length > 0 && (
@@ -122,6 +185,28 @@ export function JobTracker({
                   )}
                 </div>
               ))}
+            </div>
+          </>
+        )}
+
+        {job.recent_events.length > 0 && (
+          <>
+            <Separator />
+            <div className="flex flex-col gap-2">
+              <p className="text-sm font-medium">Recent Events</p>
+              <div className="space-y-2">
+                {job.recent_events
+                  .slice()
+                  .reverse()
+                  .map((event, index) => (
+                    <div
+                      key={`${event}-${index}`}
+                      className="rounded-md border px-3 py-2 text-xs text-muted-foreground"
+                    >
+                      {event}
+                    </div>
+                  ))}
+              </div>
             </div>
           </>
         )}

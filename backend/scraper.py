@@ -6,14 +6,17 @@ from datetime import datetime
 from pathlib import Path
 
 from scraper_config import AppConfig
-from scraper_exporters import append_master_csv, export_csv, export_json
+from scraper_exporters import append_master_csv, export_csv
 from scraper_maps import scrape_query
 from scraper_models import LeadRecord
 from scraper_utils import (
     archive_old_exports,
     checkpoint_path,
     compute_confidence,
+    dedupe_leads,
+    lead_identity_aliases,
     load_checkpoint,
+    normalize_lead,
     save_checkpoint,
     setup_logger,
     slugify,
@@ -27,10 +30,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-results", type=int, help="MAX_RESULTS_PER_QUERY")
     parser.add_argument("--max-scrolls", type=int, help="MAX_SCROLLS_PER_QUERY")
     parser.add_argument("--max-runtime-seconds", type=int, help="Optional MAX_RUNTIME_SECONDS")
-    parser.add_argument("--output-dir", help="Directory for CSV/JSON output")
+    parser.add_argument("--output-dir", help="Directory for CSV output")
     parser.add_argument("--show-browser", action="store_true", help="Run with visible browser")
     parser.add_argument("--no-enrich", action="store_true", help="Disable website enrichment pass")
-    parser.add_argument("--no-json", action="store_true", help="Disable JSON export")
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoint if available")
     return parser.parse_args()
 
@@ -51,8 +53,6 @@ def resolve_config(args: argparse.Namespace) -> AppConfig:
         cfg.headless = False
     if args.no_enrich:
         cfg.enrich_websites = False
-    if args.no_json:
-        cfg.export_json = False
     return cfg
 
 
@@ -63,15 +63,66 @@ def run_query(
     checkpoints_dir: Path,
     logger,
     resume: bool,
+    progress_callback=None,
 ) -> tuple[list[LeadRecord], float, Path]:
     started = time.time()
     run_at = datetime.now()
     checkpoint_file = checkpoint_path(checkpoints_dir, query)
     existing: list[LeadRecord] = []
+    resumed_card_keys: set[str] = set()
+    resumed_lead_keys: set[str] = set()
     if resume:
-        _, existing = load_checkpoint(checkpoint_file, query)
+        checkpoint_state = load_checkpoint(checkpoint_file, query)
+        existing = dedupe_leads(checkpoint_state.leads)
+        resumed_card_keys = set(checkpoint_state.card_keys)
+        resumed_lead_keys = set(checkpoint_state.lead_keys)
+        if not resumed_lead_keys:
+            for lead in existing:
+                resumed_lead_keys.update(lead_identity_aliases(lead))
         if existing:
-            logger.info("Loaded %s leads from checkpoint for query '%s'", len(existing), query)
+            logger.info(
+                "Loaded checkpoint for query='%s' leads=%s lead_keys=%s card_keys=%s",
+                query,
+                len(existing),
+                len(resumed_lead_keys),
+                len(resumed_card_keys),
+            )
+
+    latest_checkpoint_state = {
+        "lead_keys": set(resumed_lead_keys),
+        "card_keys": set(resumed_card_keys),
+    }
+
+    def emit_progress(**payload: object) -> None:
+        if progress_callback:
+            progress_callback({"query": query, **payload})
+
+    def persist_checkpoint(partial_leads: list[LeadRecord], lead_keys: set[str], card_keys: set[str]) -> None:
+        combined = dedupe_leads(existing + partial_leads)
+        latest_checkpoint_state["lead_keys"] = set(lead_keys)
+        latest_checkpoint_state["card_keys"] = set(card_keys)
+        save_checkpoint(
+            checkpoint_file,
+            combined,
+            latest_checkpoint_state["lead_keys"],
+            latest_checkpoint_state["card_keys"],
+        )
+        emit_progress(
+            phase="checkpoint_saved",
+            leads_collected=len(combined),
+            leads_target=cfg.max_results_per_query,
+            end_reason=None,
+            message=f"Checkpoint updated with {len(combined)} total leads",
+        )
+
+    if existing:
+        emit_progress(
+            phase="checkpoint_loaded",
+            leads_collected=len(existing),
+            leads_target=cfg.max_results_per_query,
+            end_reason=None,
+            message=f"Loaded {len(existing)} leads from checkpoint",
+        )
 
     leads = scrape_query(
         query=query,
@@ -79,15 +130,44 @@ def run_query(
         max_scrolls=cfg.max_scrolls_per_query,
         max_runtime_seconds=cfg.max_runtime_seconds,
         headless=cfg.headless,
+        logger=logger,
+        seen_lead_keys=resumed_lead_keys,
+        seen_card_keys=resumed_card_keys,
+        checkpoint_callback=persist_checkpoint,
+        progress_callback=progress_callback,
     )
-    all_leads = existing + leads
+    all_leads = dedupe_leads(existing + leads)
+    logger.info("query=%s scrape_merge existing=%s new=%s merged=%s", query, len(existing), len(leads), len(all_leads))
+    emit_progress(
+        phase="scrape_merged",
+        leads_collected=len(all_leads),
+        leads_target=cfg.max_results_per_query,
+        end_reason=None,
+        message=f"Merged scrape results into {len(all_leads)} unique leads",
+    )
 
     if cfg.enrich_websites:
         from scraper_enrichment import enrich_from_websites
 
+        emit_progress(
+            phase="enrichment_started",
+            leads_collected=len(all_leads),
+            leads_target=cfg.max_results_per_query,
+            end_reason=None,
+            message=f"Enriching {len(all_leads)} leads from websites",
+        )
         enrich_from_websites(all_leads)
+        logger.info("query=%s enrichment_complete leads=%s", query, len(all_leads))
+        emit_progress(
+            phase="enrichment_complete",
+            leads_collected=len(all_leads),
+            leads_target=cfg.max_results_per_query,
+            end_reason=None,
+            message=f"Finished enrichment for {len(all_leads)} leads",
+        )
 
     for lead in all_leads:
+        normalize_lead(lead)
         lead.confidence_score = compute_confidence(lead)
         if not lead.scraped_at:
             lead.scraped_at = run_at.strftime("%Y-%m-%d %H:%M:%S")
@@ -98,11 +178,25 @@ def run_query(
     csv_path = output_dir / f"leads_{query_slug}_{timestamp}.csv"
     export_csv(all_leads, csv_path)
     append_master_csv(all_leads, output_dir / "master_leads.csv")
-    if cfg.export_json:
-        export_json(all_leads, output_dir / f"leads_{query_slug}_{timestamp}.json")
-
-    save_checkpoint(checkpoint_file, all_leads, len(all_leads))
+    final_lead_keys: set[str] = set()
+    for lead in all_leads:
+        final_lead_keys.update(lead_identity_aliases(lead))
+    save_checkpoint(
+        checkpoint_file,
+        all_leads,
+        final_lead_keys,
+        latest_checkpoint_state["card_keys"],
+    )
     elapsed = time.time() - started
+    emit_progress(
+        phase="query_completed",
+        leads_collected=len(all_leads),
+        leads_target=cfg.max_results_per_query,
+        end_reason=None,
+        message=f"Exported CSV with {len(all_leads)} leads",
+        csv_path=str(csv_path),
+        elapsed_seconds=round(elapsed, 1),
+    )
     return all_leads, elapsed, csv_path
 
 

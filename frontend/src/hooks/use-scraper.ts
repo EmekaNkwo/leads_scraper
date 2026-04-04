@@ -15,7 +15,6 @@ const DEFAULT_FORM: ScrapeRequest = {
   max_runtime_seconds: 0,
   headless: true,
   enrich_websites: true,
-  export_json: true,
   resume: false,
 };
 
@@ -51,7 +50,6 @@ export function useScraper() {
   // Elapsed timer
   useEffect(() => {
     if (isRunning) {
-      setElapsed(0);
       timerRef.current = setInterval(() => setElapsed((s) => s + 1), 1000);
     } else if (timerRef.current) {
       clearInterval(timerRef.current);
@@ -89,6 +87,7 @@ export function useScraper() {
     const cleaned = form.queries.map((q) => q.trim()).filter(Boolean);
     if (cleaned.length === 0) return;
     try {
+      setElapsed(0);
       const job = await startScrape({ ...form, queries: cleaned }).unwrap();
       setActiveJobId(job.job_id);
     } catch {
@@ -97,12 +96,8 @@ export function useScraper() {
   }, [form, startScrape]);
 
   const viewJob = useCallback((job: JobStatus) => {
-    setActiveJobId(job.job_id);
-  }, []);
-
-  const clearActiveJob = useCallback(() => {
-    setActiveJobId(null);
     setElapsed(0);
+    setActiveJobId(job.job_id);
   }, []);
 
   const formatElapsed = useCallback((s: number) => {
@@ -125,6 +120,5 @@ export function useScraper() {
     formatElapsed,
     jobs,
     viewJob,
-    clearActiveJob,
   };
 }

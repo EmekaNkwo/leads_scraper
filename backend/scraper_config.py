@@ -17,7 +17,6 @@ class AppConfig:
     archive_after_days: int = 14
     headless: bool = True
     enrich_websites: bool = True
-    export_json: bool = True
 
     @classmethod
     def from_file(cls, path: str | None) -> "AppConfig":

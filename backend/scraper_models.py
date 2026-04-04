@@ -12,6 +12,7 @@ class LeadRecord:
     email: str = "N/A"
     owner_name: str = "N/A"
     website: str = "N/A"
+    maps_url: str = "N/A"
     category: str = "N/A"
     social_links: list[str] = field(default_factory=list)
     scraped_at: str = ""

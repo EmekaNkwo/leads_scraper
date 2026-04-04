@@ -6,6 +6,7 @@ export interface Lead {
   email: string;
   owner_name: string;
   website: string;
+  maps_url: string;
   category: string;
   social_links: string[];
   scraped_at: string;
@@ -18,6 +19,22 @@ export interface QueryResult {
   elapsed_seconds: number;
   csv_path: string;
   error: string | null;
+}
+
+export interface JobProgress {
+  query: string | null;
+  phase: string;
+  leads_collected: number;
+  leads_target: number;
+  visible_cards: number;
+  scrolls_used: number;
+  max_scrolls: number;
+  stale_scrolls: number;
+  message: string | null;
+  end_reason: string | null;
+  elapsed_seconds: number | null;
+  csv_path: string | null;
+  updated_at: string | null;
 }
 
 export interface JobStatus {
@@ -36,6 +53,8 @@ export interface JobStatus {
     queries_succeeded: number;
     queries_failed: number;
   };
+  progress: JobProgress | null;
+  recent_events: string[];
 }
 
 export interface ScrapeRequest {
@@ -45,7 +64,6 @@ export interface ScrapeRequest {
   max_runtime_seconds: number;
   headless: boolean;
   enrich_websites: boolean;
-  export_json: boolean;
   resume: boolean;
 }
 
@@ -66,7 +84,6 @@ export interface AppConfig {
   archive_after_days: number;
   headless: boolean;
   enrich_websites: boolean;
-  export_json: boolean;
 }
 
 export interface HealthStatus {

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import re
 import time
+from collections.abc import Callable
 from datetime import datetime
 from urllib.parse import quote_plus
 
 from scraper_models import LeadRecord
+from scraper_utils import NA_VALUE, canonicalize_url, lead_identity_aliases, lead_identity_key, normalize_lead
 
 try:
     from playwright.sync_api import Page, TimeoutError, sync_playwright
@@ -19,6 +22,8 @@ EMAIL_REGEX = re.compile(r"\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b"
 SCROLL_RENDER_WAIT_MS = 2500
 STALE_SCROLL_WAIT_MS = 2000
 MAX_STALE_SCROLLS = 7
+CHECKPOINT_LEAD_INTERVAL = 10
+CHECKPOINT_TIME_INTERVAL_SECONDS = 20
 
 
 def _safe_text(locator: object, timeout_ms: int = 1000) -> str:
@@ -31,12 +36,12 @@ def _safe_text(locator: object, timeout_ms: int = 1000) -> str:
 
 def _extract_phone(text: str) -> str:
     match = re.search(r"(\+?\d[\d\-\s\(\)]{6,}\d)", text)
-    return match.group(1).strip() if match else "N/A"
+    return match.group(1).strip() if match else NA_VALUE
 
 
 def _extract_owner_name(text: str) -> str:
     match = re.search(r"(?:owner|founder|director|manager)\s*[:\-]\s*([^\n|]+)", text, re.IGNORECASE)
-    return match.group(1).strip() if match else "N/A"
+    return match.group(1).strip() if match else NA_VALUE
 
 
 def _open_maps_search(page: Page, query: str) -> None:
@@ -79,10 +84,10 @@ def _get_card_fallback_text(card: object) -> str:
 
 def _get_card_key(card: object) -> str:
     try:
-        href = (card.locator("a.hfpxzc").first.get_attribute("href", timeout=1000) or "").strip()
+        href = canonicalize_url(card.locator("a.hfpxzc").first.get_attribute("href", timeout=1000) or "")
     except Exception:
         href = ""
-    if href:
+    if href and href != NA_VALUE:
         return f"href:{href}"
     name = _get_card_name(card)
     if name:
@@ -117,12 +122,12 @@ def _scroll_once(page: Page) -> None:
     page.wait_for_timeout(SCROLL_RENDER_WAIT_MS)
 
 
-def _extract_details_from_panel(page: Page) -> tuple[str, str, str, str, str, str, list[str]]:
+def _extract_details_from_panel(page: Page) -> tuple[str, str, str, str, str, str, str, list[str]]:
     panel = page.locator("div[role='main']").first
     panel_text = _safe_text(panel, timeout_ms=2000)
     address = _safe_text(
         page.locator("button[data-item-id='address'] .Io6YTe, button[data-item-id='address'] .fontBodyMedium")
-    ) or "N/A"
+    ) or NA_VALUE
     phone = _safe_text(
         page.locator(
             "button[data-item-id^='phone:tel:'] .Io6YTe, "
@@ -130,15 +135,16 @@ def _extract_details_from_panel(page: Page) -> tuple[str, str, str, str, str, st
         )
     ) or _extract_phone(panel_text)
     email_match = EMAIL_REGEX.search(panel_text)
-    email = email_match.group(0) if email_match else "N/A"
+    email = email_match.group(0) if email_match else NA_VALUE
     owner_name = _extract_owner_name(panel_text)
     try:
-        website = page.locator("a[data-item-id='authority']").first.get_attribute("href", timeout=1000) or "N/A"
+        website = page.locator("a[data-item-id='authority']").first.get_attribute("href", timeout=1000) or NA_VALUE
     except Exception:
-        website = "N/A"
+        website = NA_VALUE
+    maps_url = canonicalize_url(page.url)
     category = _safe_text(page.locator("button[jsaction*='pane.rating.category'] .DkEaL"), timeout_ms=500)
     if not category:
-        category = "N/A"
+        category = NA_VALUE
 
     social_links: list[str] = []
     for href in page.locator("a[href*='instagram.com'],a[href*='facebook.com'],a[href*='linkedin.com']").all():
@@ -148,7 +154,7 @@ def _extract_details_from_panel(page: Page) -> tuple[str, str, str, str, str, st
             link = None
         if link:
             social_links.append(link)
-    return phone, address, email, owner_name, website, category, list(dict.fromkeys(social_links))
+    return phone, address, email, owner_name, website, maps_url, category, list(dict.fromkeys(social_links))
 
 
 def scrape_query(
@@ -157,22 +163,58 @@ def scrape_query(
     max_scrolls: int,
     max_runtime_seconds: int | None,
     headless: bool = True,
+    logger: logging.Logger | None = None,
+    seen_lead_keys: set[str] | None = None,
+    seen_card_keys: set[str] | None = None,
+    checkpoint_callback: Callable[[list[LeadRecord], set[str], set[str]], None] | None = None,
+    progress_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> list[LeadRecord]:
     if sync_playwright is None:
         raise RuntimeError("Playwright is not installed. Run pip install -r requirements.txt then playwright install.")
 
-    SECONDS_PER_LEAD = 10
-    MIN_TIMEOUT = 120
-    MAX_TIMEOUT = 1800
-    auto_timeout = min(MAX_TIMEOUT, max(MIN_TIMEOUT, max_results * SECONDS_PER_LEAD))
+    seconds_per_lead = 10
+    min_timeout = 120
+    max_timeout = 1800
+    auto_timeout = min(max_timeout, max(min_timeout, max_results * seconds_per_lead))
     effective_timeout = max_runtime_seconds if max_runtime_seconds else auto_timeout
 
     started = time.time()
     results: list[LeadRecord] = []
-    seen: set[str] = set()
-    seen_card_keys: set[str] = set()
+    seen_lead_keys = set(seen_lead_keys or set())
+    seen_card_keys = set(seen_card_keys or set())
     stale_scrolls = 0
     scrolls_used = 0
+    loop_count = 0
+    last_checkpoint_at = started
+    last_checkpoint_count = 0
+    end_reason = "completed"
+
+    def emit_progress(**payload: object) -> None:
+        if progress_callback:
+            progress_callback(payload)
+
+    if logger:
+        logger.info(
+            "query=%s scrape_started target_results=%s max_scrolls=%s timeout_seconds=%s headless=%s resumed_leads=%s resumed_cards=%s",
+            query,
+            max_results,
+            max_scrolls,
+            effective_timeout,
+            headless,
+            len(seen_lead_keys),
+            len(seen_card_keys),
+        )
+    emit_progress(
+        query=query,
+        phase="scrape_started",
+        leads_collected=0,
+        leads_target=max_results,
+        visible_cards=0,
+        scrolls_used=0,
+        max_scrolls=max_scrolls,
+        stale_scrolls=0,
+        message=f"Started scraping '{query}'",
+    )
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
@@ -181,61 +223,139 @@ def scrape_query(
             _open_maps_search(page, query)
 
             while len(results) < max_results:
+                loop_count += 1
                 if time.time() - started >= effective_timeout:
+                    end_reason = "runtime_limit"
                     break
 
                 cards = page.locator("div.Nv2PK, div[role='article']")
                 total_visible = cards.count()
+                if logger:
+                    logger.info(
+                        "query=%s pass=%s collected=%s/%s visible_cards=%s scrolls_used=%s/%s stale_scrolls=%s seen_cards=%s",
+                        query,
+                        loop_count,
+                        len(results),
+                        max_results,
+                        total_visible,
+                        scrolls_used,
+                        max_scrolls,
+                        stale_scrolls,
+                        len(seen_card_keys),
+                    )
+                emit_progress(
+                    query=query,
+                    phase="scraping",
+                    leads_collected=len(results),
+                    leads_target=max_results,
+                    visible_cards=total_visible,
+                    scrolls_used=scrolls_used,
+                    max_scrolls=max_scrolls,
+                    stale_scrolls=stale_scrolls,
+                    message=f"Scanning pass {loop_count} with {total_visible} visible cards",
+                )
                 discovered_this_pass = 0
                 while discovered_this_pass < total_visible:
                     if time.time() - started >= effective_timeout:
+                        end_reason = "runtime_limit"
                         break
                     if len(results) >= max_results:
+                        end_reason = "max_results_reached"
                         break
 
                     card = cards.nth(discovered_this_pass)
                     discovered_this_pass += 1
                     card_key = _get_card_key(card)
                     if not card_key or card_key in seen_card_keys:
+                        if logger and logger.isEnabledFor(logging.DEBUG):
+                            logger.debug("query=%s skip_card card_key=%s reason=%s", query, card_key or "missing", "seen_or_missing")
                         continue
-                    seen_card_keys.add(card_key)
 
                     name = _get_card_name(card)
                     if not name:
+                        if logger and logger.isEnabledFor(logging.DEBUG):
+                            logger.debug("query=%s skip_card card_key=%s reason=missing_name", query, card_key)
                         continue
 
                     try:
                         card.locator("a.hfpxzc").first.click(timeout=1500)
                         page.wait_for_timeout(600)
                     except Exception:
+                        if logger and logger.isEnabledFor(logging.DEBUG):
+                            logger.debug("query=%s skip_card card_key=%s reason=click_failed", query, card_key)
                         continue
 
-                    phone, address, email, owner_name, website, category, social_links = _extract_details_from_panel(page)
-                    phone_digits = re.sub(r"\D+", "", phone)
-                    key = f"{name.lower()}|{address.lower()}|{phone_digits}"
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    results.append(
+                    seen_card_keys.add(card_key)
+                    phone, address, email, owner_name, website, maps_url, category, social_links = _extract_details_from_panel(page)
+                    lead = normalize_lead(
                         LeadRecord(
                             query=query,
                             name=name,
-                            phone=phone or "N/A",
-                            address=address or "N/A",
-                            email=email or "N/A",
-                            owner_name=owner_name or "N/A",
-                            website=website or "N/A",
-                            category=category or "N/A",
+                            phone=phone or NA_VALUE,
+                            address=address or NA_VALUE,
+                            email=email or NA_VALUE,
+                            owner_name=owner_name or NA_VALUE,
+                            website=website or NA_VALUE,
+                            maps_url=maps_url or NA_VALUE,
+                            category=category or NA_VALUE,
                             social_links=social_links,
                             scraped_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         )
                     )
+                    lead_key = lead_identity_key(lead)
+                    lead_aliases = lead_identity_aliases(lead)
+                    if seen_lead_keys.intersection(lead_aliases):
+                        if logger and logger.isEnabledFor(logging.DEBUG):
+                            logger.debug("query=%s skip_lead lead_key=%s reason=duplicate", query, lead_key)
+                        continue
+                    seen_lead_keys.update(lead_aliases)
+                    results.append(lead)
+
+                    if logger and len(results) % 10 == 0:
+                        logger.info(
+                            "query=%s progress leads=%s/%s scrolls_used=%s/%s unique_cards=%s",
+                            query,
+                            len(results),
+                            max_results,
+                            scrolls_used,
+                            max_scrolls,
+                            len(seen_card_keys),
+                        )
+                    if len(results) % 5 == 0:
+                        emit_progress(
+                            query=query,
+                            phase="scraping",
+                            leads_collected=len(results),
+                            leads_target=max_results,
+                            visible_cards=total_visible,
+                            scrolls_used=scrolls_used,
+                            max_scrolls=max_scrolls,
+                            stale_scrolls=stale_scrolls,
+                            message=f"Collected {len(results)} of {max_results} leads",
+                        )
+                    if checkpoint_callback and (
+                        len(results) - last_checkpoint_count >= CHECKPOINT_LEAD_INTERVAL
+                        or time.time() - last_checkpoint_at >= CHECKPOINT_TIME_INTERVAL_SECONDS
+                    ):
+                        checkpoint_callback(results, seen_lead_keys, seen_card_keys)
+                        last_checkpoint_at = time.time()
+                        last_checkpoint_count = len(results)
+                        if logger:
+                            logger.info(
+                                "query=%s checkpoint_saved partial_leads=%s total_known_cards=%s",
+                                query,
+                                len(results),
+                                len(seen_card_keys),
+                            )
 
                 if len(results) >= max_results:
+                    end_reason = "max_results_reached"
                     break
                 if time.time() - started >= effective_timeout:
+                    end_reason = "runtime_limit"
                     break
                 if scrolls_used >= max_scrolls:
+                    end_reason = "max_scrolls_reached"
                     break
 
                 _scroll_once(page)
@@ -246,8 +366,32 @@ def scrape_query(
                 else:
                     stale_scrolls = 0
                 if stale_scrolls >= MAX_STALE_SCROLLS:
+                    end_reason = "stale_scroll_limit"
                     break
         finally:
+            if checkpoint_callback and results:
+                checkpoint_callback(results, seen_lead_keys, seen_card_keys)
             browser.close()
+    if logger:
+        logger.info(
+            "query=%s scrape_finished leads=%s duration_seconds=%.1f scrolls_used=%s end_reason=%s",
+            query,
+            len(results),
+            time.time() - started,
+            scrolls_used,
+            end_reason,
+        )
+    emit_progress(
+        query=query,
+        phase="scrape_finished",
+        leads_collected=len(results),
+        leads_target=max_results,
+        visible_cards=0,
+        scrolls_used=scrolls_used,
+        max_scrolls=max_scrolls,
+        stale_scrolls=stale_scrolls,
+        end_reason=end_reason,
+        message=f"Scrape finished with {len(results)} leads",
+    )
     return results
 

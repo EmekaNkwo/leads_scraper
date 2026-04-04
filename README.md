@@ -1,6 +1,6 @@
 # Leads Scraper
 
-Google Maps leads scraper with enrichment, export pipeline, REST API, and React frontend.
+Google Maps leads scraper with enrichment, resumable checkpoints, CSV export pipeline, REST API, and React frontend.
 
 ![Leads Scraper Dashboard](demo.png)
 
@@ -10,9 +10,8 @@ Google Maps leads scraper with enrichment, export pipeline, REST API, and React 
 - Scrapes leads from Google Maps search queries.
 - Supports multiple queries in one run.
 - Optional website enrichment for email/owner/team hints.
-- Exports per-query CSV and JSON files.
-- Appends all runs to a master CSV.
-- Supports checkpoints/resume and run logs.
+- Exports per-query CSV files plus a deduped master CSV.
+- Supports checkpoints/resume, periodic progress logging, and run logs.
 - Auto-timeout: scales with requested results, capped at 30 min.
 - REST API with Swagger docs.
 - React frontend (Next.js + shadcn/ui + Redux Toolkit).
@@ -26,7 +25,7 @@ leads_scraper/
 │   ├── scraper.py              # CLI entrypoint
 │   ├── scraper_maps.py         # Google Maps scraping logic
 │   ├── scraper_enrichment.py   # Website enrichment pass
-│   ├── scraper_exporters.py    # CSV/JSON export helpers
+│   ├── scraper_exporters.py    # CSV export helpers
 │   ├── scraper_utils.py        # Logging, confidence, checkpoints
 │   ├── scraper_models.py       # Lead data model
 │   ├── scraper_config.py       # Config loader
@@ -84,6 +83,8 @@ python scraper.py --show-browser
 python scraper.py --resume
 ```
 
+The CLI now emits progress logs during long runs and saves resumable checkpoint state while scraping.
+
 ### API server
 
 ```bash
@@ -118,7 +119,6 @@ Opens at http://localhost:3000 (proxies API calls to :8000).
 --output-dir        Output folder override
 --show-browser      Disable headless mode
 --no-enrich         Skip website enrichment
---no-json           Skip JSON export
 --resume            Resume from checkpoint
 ```
 
@@ -140,7 +140,6 @@ Opens at http://localhost:3000 (proxies API calls to :8000).
 Generated inside `backend/`:
 
 - `csv_exports/leads_<query>_<timestamp>.csv`
-- `csv_exports/leads_<query>_<timestamp>.json`
 - `csv_exports/master_leads.csv`
 - `logs/run_<run_id>.log`
 - `checkpoints/<query>.json`

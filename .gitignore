@@ -25,6 +25,7 @@ logs/
 backend/csv_exports/*.csv
 backend/csv_exports/*.json
 backend/csv_exports/archive/
+backend/verification_exports*/
 
 # Frontend
 frontend/node_modules/
