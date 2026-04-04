@@ -16,6 +16,9 @@ except ModuleNotFoundError:
 
 
 EMAIL_REGEX = re.compile(r"\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b")
+SCROLL_RENDER_WAIT_MS = 2500
+STALE_SCROLL_WAIT_MS = 2000
+MAX_STALE_SCROLLS = 7
 
 
 def _safe_text(locator: object, timeout_ms: int = 1000) -> str:
@@ -55,35 +58,63 @@ def _open_maps_search(page: Page, query: str) -> None:
     page.wait_for_selector("div[role='feed'], div.Nv2PK, div[role='article']", timeout=45_000)
 
 
-def _scroll_once(page: Page) -> tuple[int, int]:
-    """Perform a single scroll and return (before_count, after_count)."""
+def _get_card_name(card: object) -> str:
+    name = ""
+    try:
+        name = (card.locator("a.hfpxzc").first.get_attribute("aria-label", timeout=1000) or "").strip()
+    except Exception:
+        pass
+    if not name:
+        name = _safe_text(card.locator("div.qBF1Pd, div.fontHeadlineSmall, h3"), timeout_ms=1000)
+    return name
+
+
+def _get_card_fallback_text(card: object) -> str:
+    try:
+        text = (card.first.text_content(timeout=1000) or "").strip()
+    except Exception:
+        return ""
+    return " ".join(text.split())
+
+
+def _get_card_key(card: object) -> str:
+    try:
+        href = (card.locator("a.hfpxzc").first.get_attribute("href", timeout=1000) or "").strip()
+    except Exception:
+        href = ""
+    if href:
+        return f"href:{href}"
+    name = _get_card_name(card)
+    if name:
+        fallback_text = _get_card_fallback_text(card)
+        if fallback_text:
+            return f"text:{name.casefold()}|{fallback_text.casefold()}"
+        return f"name:{name.casefold()}"
+    fallback_text = _get_card_fallback_text(card)
+    if fallback_text:
+        return f"text:{fallback_text.casefold()}"
+    return ""
+
+
+def _count_unseen_visible_cards(page: Page, seen_card_keys: set[str]) -> int:
+    cards = page.locator("div.Nv2PK, div[role='article']")
+    unseen = 0
+    for index in range(cards.count()):
+        card_key = _get_card_key(cards.nth(index))
+        if card_key and card_key not in seen_card_keys:
+            unseen += 1
+    return unseen
+
+
+def _scroll_once(page: Page) -> None:
+    """Perform a single scroll and allow Maps time to render the next batch."""
     feed = page.locator("div[role='feed']").first
     has_feed = feed.count() > 0
-    before = page.locator("div.Nv2PK, div[role='article']").count()
     if has_feed:
         feed.evaluate("(node) => node.scrollBy(0, node.scrollHeight)")
     else:
         page.mouse.wheel(0, 3000)
-    page.wait_for_timeout(1500)
-    after = page.locator("div.Nv2PK, div[role='article']").count()
-    return before, after
-
-
-def _scroll_until(page: Page, max_scrolls: int, target: int) -> None:
-    """Scroll until target card count is visible or max_scrolls exhausted."""
-    stale_runs = 0
-    scrolls_used = 0
-    while scrolls_used < max_scrolls and stale_runs < 3:
-        current = page.locator("div.Nv2PK, div[role='article']").count()
-        if current >= target:
-            break
-        before, after = _scroll_once(page)
-        scrolls_used += 1
-        if after <= before:
-            stale_runs += 1
-            page.wait_for_timeout(800)
-        else:
-            stale_runs = 0
+    page.wait_for_timeout(SCROLL_RENDER_WAIT_MS)
 
 
 def _extract_details_from_panel(page: Page) -> tuple[str, str, str, str, str, str, list[str]]:
@@ -139,8 +170,9 @@ def scrape_query(
     started = time.time()
     results: list[LeadRecord] = []
     seen: set[str] = set()
-    scrolls_remaining = max_scrolls
-    processed_idx = 0
+    seen_card_keys: set[str] = set()
+    stale_scrolls = 0
+    scrolls_used = 0
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
@@ -152,32 +184,23 @@ def scrape_query(
                 if time.time() - started >= effective_timeout:
                     break
 
-                _scroll_until(page, scrolls_remaining, max_results + 5)
-
                 cards = page.locator("div.Nv2PK, div[role='article']")
                 total_visible = cards.count()
-
-                if processed_idx >= total_visible:
-                    break
-
-                made_progress = False
-                while processed_idx < total_visible:
+                discovered_this_pass = 0
+                while discovered_this_pass < total_visible:
                     if time.time() - started >= effective_timeout:
                         break
                     if len(results) >= max_results:
                         break
 
-                    card = cards.nth(processed_idx)
-                    processed_idx += 1
-                    made_progress = True
+                    card = cards.nth(discovered_this_pass)
+                    discovered_this_pass += 1
+                    card_key = _get_card_key(card)
+                    if not card_key or card_key in seen_card_keys:
+                        continue
+                    seen_card_keys.add(card_key)
 
-                    name = ""
-                    try:
-                        name = (card.locator("a.hfpxzc").first.get_attribute("aria-label", timeout=1000) or "").strip()
-                    except Exception:
-                        pass
-                    if not name:
-                        name = _safe_text(card.locator("div.qBF1Pd, div.fontHeadlineSmall, h3"), timeout_ms=1000)
+                    name = _get_card_name(card)
                     if not name:
                         continue
 
@@ -185,7 +208,7 @@ def scrape_query(
                         card.locator("a.hfpxzc").first.click(timeout=1500)
                         page.wait_for_timeout(600)
                     except Exception:
-                        pass
+                        continue
 
                     phone, address, email, owner_name, website, category, social_links = _extract_details_from_panel(page)
                     phone_digits = re.sub(r"\D+", "", phone)
@@ -208,10 +231,22 @@ def scrape_query(
                         )
                     )
 
-                if not made_progress or len(results) >= max_results:
+                if len(results) >= max_results:
+                    break
+                if time.time() - started >= effective_timeout:
+                    break
+                if scrolls_used >= max_scrolls:
                     break
 
-                scrolls_remaining = max(scrolls_remaining - 2, 2)
+                _scroll_once(page)
+                scrolls_used += 1
+                if _count_unseen_visible_cards(page, seen_card_keys) == 0:
+                    stale_scrolls += 1
+                    page.wait_for_timeout(STALE_SCROLL_WAIT_MS)
+                else:
+                    stale_scrolls = 0
+                if stale_scrolls >= MAX_STALE_SCROLLS:
+                    break
         finally:
             browser.close()
     return results

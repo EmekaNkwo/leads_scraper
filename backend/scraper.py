@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 
 from scraper_config import AppConfig
-from scraper_enrichment import enrich_from_websites
 from scraper_exporters import append_master_csv, export_csv, export_json
 from scraper_maps import scrape_query
 from scraper_models import LeadRecord
@@ -84,6 +83,8 @@ def run_query(
     all_leads = existing + leads
 
     if cfg.enrich_websites:
+        from scraper_enrichment import enrich_from_websites
+
         enrich_from_websites(all_leads)
 
     for lead in all_leads:
