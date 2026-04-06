@@ -65,6 +65,7 @@ export default function Dashboard() {
           <div className="flex min-w-0 flex-col gap-6">
             <JobTracker
               job={activeJob}
+              onDownloadCsv={downloadJobCsv}
               isRunning={isRunning}
               elapsed={elapsed}
               formatElapsed={formatElapsed}

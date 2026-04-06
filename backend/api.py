@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import sqlite3
 import time
 import uuid
 from datetime import datetime
@@ -14,8 +15,9 @@ from pydantic import BaseModel, Field
 
 from scraper import run_query
 from scraper_config import AppConfig
+from scraper_dedupe_store import count_seen_aliases, save_seen_leads
 from scraper_models import LeadRecord
-from scraper_utils import setup_logger, slugify
+from scraper_utils import cleanup_expired_files, path_expiration, setup_logger, slugify
 
 app = FastAPI(
     title="Leads Scraper API",
@@ -67,6 +69,7 @@ class QueryResult(BaseModel):
     leads_count: int
     elapsed_seconds: float
     csv_path: str
+    export_expires_at: str | None = None
     error: str | None = None
 
 
@@ -83,6 +86,7 @@ class JobProgress(BaseModel):
     end_reason: str | None = None
     elapsed_seconds: float | None = None
     csv_path: str | None = None
+    export_expires_at: str | None = None
     updated_at: str | None = None
 
 
@@ -91,6 +95,7 @@ class JobStatus(BaseModel):
     status: str = Field(description="pending | running | completed | failed")
     created_at: str
     completed_at: str | None = None
+    queries: list[str] = Field(default_factory=list)
     queries_total: int
     queries_done: int = 0
     results: list[QueryResult] = Field(default_factory=list)
@@ -98,12 +103,16 @@ class JobStatus(BaseModel):
     summary: dict[str, int] = Field(default_factory=dict)
     progress: JobProgress | None = None
     recent_events: list[str] = Field(default_factory=list)
+    export_retention_minutes: int = 0
+    exports_are_temporary: bool = True
+    master_csv_enabled: bool = True
 
 
 class ExportFile(BaseModel):
     filename: str
     size_bytes: int
     modified_at: str
+    expires_at: str | None = None
 
 
 class ConfigOut(BaseModel):
@@ -114,15 +123,20 @@ class ConfigOut(BaseModel):
     output_dir: str
     logs_dir: str
     checkpoint_dir: str
-    archive_after_days: int
+    export_retention_minutes: int
     headless: bool
     enrich_websites: bool
+    enable_master_csv: bool
 
 
 class HealthOut(BaseModel):
     status: str
     version: str
     uptime_seconds: float
+
+
+class DedupeStatusOut(BaseModel):
+    alias_count: int
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +146,40 @@ class HealthOut(BaseModel):
 _jobs: dict[str, JobStatus] = {}
 _jobs_lock = Lock()
 _start_time = time.time()
+
+
+def _load_runtime_config() -> AppConfig:
+    return AppConfig.from_file("scraper_config.json")
+
+
+def _protected_runtime_paths(cfg: AppConfig) -> set[Path]:
+    protected: set[Path] = set()
+    checkpoint_dir = Path(cfg.checkpoint_dir)
+    with _jobs_lock:
+        active_jobs = [job for job in _jobs.values() if job.status in {"pending", "running"}]
+
+    for job in active_jobs:
+        for result in job.results:
+            if result.csv_path:
+                protected.add(Path(result.csv_path))
+        for query in job.queries:
+            protected.add(checkpoint_dir / f"{slugify(query)}.json")
+    return protected
+
+
+def _cleanup_runtime_files(cfg: AppConfig, include_all: bool = True) -> int:
+    paths = [Path(cfg.output_dir)]
+    patterns = ["leads_*.csv"]
+    if include_all:
+        paths.extend([Path(cfg.checkpoint_dir), Path(cfg.logs_dir)])
+        patterns.extend(["*.json", "*.log"])
+
+    return cleanup_expired_files(
+        paths,
+        cfg.export_retention_minutes,
+        patterns,
+        protected_paths=_protected_runtime_paths(cfg),
+    )
 
 
 def _lead_to_out(lead: LeadRecord) -> LeadOut:
@@ -156,18 +204,18 @@ def _run_job(job_id: str, req: ScrapeRequest) -> None:
         job = _jobs[job_id]
         job.status = "running"
 
-    cfg = AppConfig(
-        queries=req.queries,
-        max_results_per_query=req.max_results_per_query,
-        max_scrolls_per_query=req.max_scrolls_per_query,
-        max_runtime_seconds=req.max_runtime_seconds,
-        headless=req.headless,
-        enrich_websites=req.enrich_websites,
-    )
+    cfg = _load_runtime_config()
+    cfg.queries = req.queries
+    cfg.max_results_per_query = req.max_results_per_query
+    cfg.max_scrolls_per_query = req.max_scrolls_per_query
+    cfg.max_runtime_seconds = req.max_runtime_seconds
+    cfg.headless = req.headless
+    cfg.enrich_websites = req.enrich_websites
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     logger = setup_logger(Path(cfg.logs_dir), run_id)
     output_dir = Path(cfg.output_dir)
     checkpoints_dir = Path(cfg.checkpoint_dir)
+    _cleanup_runtime_files(cfg)
 
     total_leads = 0
     total_emails = 0
@@ -194,6 +242,11 @@ def _run_job(job_id: str, req: ScrapeRequest) -> None:
                 end_reason=end_reason,
                 elapsed_seconds=float(update.get("elapsed_seconds")) if update.get("elapsed_seconds") is not None else previous.elapsed_seconds,
                 csv_path=str(update.get("csv_path")) if update.get("csv_path") is not None else previous.csv_path,
+                export_expires_at=(
+                    str(update.get("export_expires_at"))
+                    if update.get("export_expires_at") is not None
+                    else previous.export_expires_at
+                ),
                 updated_at=datetime.now().isoformat(),
             )
             if message is not None:
@@ -218,6 +271,11 @@ def _run_job(job_id: str, req: ScrapeRequest) -> None:
                         leads_count=len(leads),
                         elapsed_seconds=round(elapsed, 1),
                         csv_path=str(csv_path),
+                        export_expires_at=(
+                            path_expiration(Path(csv_path), cfg.export_retention_minutes).isoformat()
+                            if cfg.export_retention_minutes > 0
+                            else None
+                        ),
                     )
                 )
             total_leads += len(leads)
@@ -278,10 +336,22 @@ def health_check():
     )
 
 
+@app.get("/dedupe/status", response_model=DedupeStatusOut, tags=["System"])
+def get_dedupe_status():
+    """Return the current size of the persistent dedupe store."""
+    cfg = _load_runtime_config()
+    db_path = Path(cfg.dedupe_db_path)
+    try:
+        alias_count = count_seen_aliases(db_path)
+    except sqlite3.Error as exc:
+        raise HTTPException(status_code=503, detail=f"Dedupe store unavailable: {exc}") from exc
+    return DedupeStatusOut(alias_count=alias_count)
+
+
 @app.get("/config", response_model=ConfigOut, tags=["Configuration"])
 def get_config():
     """Return the current default configuration from scraper_config.json."""
-    cfg = AppConfig.from_file("scraper_config.json")
+    cfg = _load_runtime_config()
     return ConfigOut(
         queries=cfg.queries,
         max_results_per_query=cfg.max_results_per_query,
@@ -290,9 +360,10 @@ def get_config():
         output_dir=cfg.output_dir,
         logs_dir=cfg.logs_dir,
         checkpoint_dir=cfg.checkpoint_dir,
-        archive_after_days=cfg.archive_after_days,
+        export_retention_minutes=cfg.export_retention_minutes,
         headless=cfg.headless,
         enrich_websites=cfg.enrich_websites,
+        enable_master_csv=cfg.enable_master_csv,
     )
 
 
@@ -304,12 +375,17 @@ def start_scrape(req: ScrapeRequest):
     The job runs in the background. Use the returned `job_id` to poll
     progress via `GET /scrape/{job_id}`.
     """
+    cfg = _load_runtime_config()
     job_id = uuid.uuid4().hex[:12]
     job = JobStatus(
         job_id=job_id,
         status="pending",
         created_at=datetime.now().isoformat(),
+        queries=req.queries,
         queries_total=len(req.queries),
+        export_retention_minutes=cfg.export_retention_minutes,
+        exports_are_temporary=cfg.export_retention_minutes > 0,
+        master_csv_enabled=cfg.enable_master_csv,
     )
     with _jobs_lock:
         _jobs[job_id] = job
@@ -351,7 +427,9 @@ def list_exports(
     limit: int = Query(20, ge=1, le=100, description="Max files to return"),
 ):
     """List recent CSV export files."""
-    export_dir = Path("csv_exports")
+    cfg = _load_runtime_config()
+    _cleanup_runtime_files(cfg, include_all=False)
+    export_dir = Path(cfg.output_dir)
     if not export_dir.exists():
         return []
     files = sorted(export_dir.glob("leads_*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -360,6 +438,11 @@ def list_exports(
             filename=f.name,
             size_bytes=f.stat().st_size,
             modified_at=datetime.fromtimestamp(f.stat().st_mtime).isoformat(),
+            expires_at=(
+                path_expiration(f, cfg.export_retention_minutes).isoformat()
+                if cfg.export_retention_minutes > 0
+                else None
+            ),
         )
         for f in files[:limit]
     ]
@@ -368,8 +451,18 @@ def list_exports(
 @app.get("/exports/{filename}", tags=["Exports"])
 def download_export(filename: str):
     """Download a specific export file by name."""
-    filepath = Path("csv_exports") / filename
-    if filepath.suffix != ".csv" or not filepath.exists() or not filepath.is_file():
+    cfg = _load_runtime_config()
+    _cleanup_runtime_files(cfg, include_all=False)
+    export_dir = Path(cfg.output_dir).resolve()
+    requested = Path(filename)
+    filepath = (export_dir / requested).resolve()
+    if (
+        requested.name != filename
+        or filepath.parent != export_dir
+        or filepath.suffix != ".csv"
+        or not filepath.exists()
+        or not filepath.is_file()
+    ):
         raise HTTPException(status_code=404, detail=f"File '{filename}' not found.")
     media = "text/csv"
     return StreamingResponse(

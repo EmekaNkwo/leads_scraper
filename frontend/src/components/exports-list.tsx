@@ -53,11 +53,11 @@ export function ExportsList({
         render: (row) => formatBytes(row.size_bytes),
       },
       {
-        key: "date",
-        header: "Date",
-        headerClassName: "w-[160px]",
+        key: "expiry",
+        header: "Expires",
+        headerClassName: "w-[180px]",
         className: "text-xs text-muted-foreground",
-        render: (row) => formatDate(row.modified_at),
+        render: (row) => (row.expires_at ? formatDate(row.expires_at) : "No expiry"),
       },
       {
         key: "actions",
@@ -87,7 +87,7 @@ export function ExportsList({
           <div>
             <CardTitle>Export Files</CardTitle>
             <CardDescription>
-              {files.length} file{files.length !== 1 && "s"} on disk
+              {files.length} temporary file{files.length !== 1 && "s"} currently on disk
             </CardDescription>
           </div>
           <Button

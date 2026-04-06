@@ -3,10 +3,13 @@
 import {
   CheckCircle,
   Clock,
+  DownloadSimple,
+  Info,
   Spinner,
   Warning,
   XCircle,
 } from "@phosphor-icons/react";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -17,10 +20,17 @@ import {
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { useGetDedupeStatusQuery } from "@/lib/scraper-api";
 import type { JobStatus } from "@/types";
 
 interface JobTrackerProps {
   job: JobStatus | undefined;
+  onDownloadCsv: (jobId: string) => void;
   isRunning: boolean;
   elapsed: number;
   formatElapsed: (s: number) => string;
@@ -39,10 +49,15 @@ const statusConfig = {
 
 export function JobTracker({
   job,
+  onDownloadCsv,
   isRunning,
   elapsed,
   formatElapsed,
 }: JobTrackerProps) {
+  const { data: dedupeStatus } = useGetDedupeStatusQuery(undefined, {
+    pollingInterval: 30000,
+  });
+
   if (!job) {
     return (
       <Card>
@@ -71,6 +86,15 @@ export function JobTracker({
       ? Math.round((job.queries_done / job.queries_total) * 100)
       : 0;
   const progress = liveProgress?.query ? Math.max(queryProgress, overallProgress) : overallProgress;
+  const latestExportExpiry = job.results
+    .map((result) => result.export_expires_at)
+    .filter((value): value is string => Boolean(value))
+    .sort((left, right) => new Date(left).getTime() - new Date(right).getTime())[0];
+  const shouldShowDownloadPrompt =
+    !isRunning &&
+    job.leads.length > 0 &&
+    (job.status === "completed" || job.status === "failed");
+  const formatExpiry = (iso: string) => new Date(iso).toLocaleString();
 
   return (
     <Card>
@@ -90,6 +114,64 @@ export function JobTracker({
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
+        {dedupeStatus ? (
+          <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+            <div className="flex items-center gap-2">
+              <span>
+                Persistent memory:{" "}
+                <span className="font-mono font-medium text-foreground">
+                  {dedupeStatus.alias_count.toLocaleString()}
+                </span>{" "}
+                businesses seen
+              </span>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className="inline-flex items-center text-muted-foreground transition-colors hover:text-foreground"
+                    aria-label="Explain persistent memory"
+                  >
+                    <Info className="size-3.5" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="max-w-[260px]">
+                  This count comes from SQLite dedupe keys used to remember
+                  previously seen businesses. It is not a count of full CSV rows
+                  stored on disk.
+                </TooltipContent>
+              </Tooltip>
+            </div>
+          </div>
+        ) : null}
+
+        {shouldShowDownloadPrompt && (
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="space-y-1">
+                <p className="text-sm font-medium text-foreground">
+                  {job.status === "completed"
+                    ? "Scrape finished successfully. Download your CSV now."
+                    : "Partial results are ready. Download your CSV now."}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {job.exports_are_temporary
+                    ? `Temporary CSV files are removed automatically after ${job.export_retention_minutes} minutes${latestExportExpiry ? `, and may disappear as early as ${formatExpiry(latestExportExpiry)}` : ""}.`
+                    : "Download this CSV now to keep a local copy of the results."}
+                </p>
+                {!job.master_csv_enabled && (
+                  <p className="text-xs text-muted-foreground">
+                    Long-term export archiving is disabled on this deployment.
+                  </p>
+                )}
+              </div>
+              <Button variant="outline" size="sm" onClick={() => onDownloadCsv(job.job_id)}>
+                <DownloadSimple data-icon="inline-start" />
+                Download CSV
+              </Button>
+            </div>
+          </div>
+        )}
+
         {isRunning && (
           <div className="flex flex-col gap-2">
             <div className="flex items-center justify-between text-sm">
@@ -152,6 +234,9 @@ export function JobTracker({
                     <span>End reason: {liveProgress.end_reason.replaceAll("_", " ")}</span>
                   )}
                   {liveProgress.csv_path && <span>Latest CSV: {liveProgress.csv_path}</span>}
+                  {liveProgress.export_expires_at && (
+                    <span>Expires: {formatExpiry(liveProgress.export_expires_at)}</span>
+                  )}
                 </div>
               )}
             </div>

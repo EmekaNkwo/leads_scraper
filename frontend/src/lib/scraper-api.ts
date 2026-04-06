@@ -1,6 +1,7 @@
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import type {
   AppConfig,
+  DedupeStatus,
   ExportFile,
   HealthStatus,
   JobStatus,
@@ -14,6 +15,10 @@ export const scraperApi = createApi({
   endpoints: (builder) => ({
     getHealth: builder.query<HealthStatus, void>({
       query: () => "/health",
+    }),
+
+    getDedupeStatus: builder.query<DedupeStatus, void>({
+      query: () => "/dedupe/status",
     }),
 
     getConfig: builder.query<AppConfig, void>({
@@ -49,6 +54,7 @@ export const scraperApi = createApi({
 
 export const {
   useGetHealthQuery,
+  useGetDedupeStatusQuery,
   useGetConfigQuery,
   useStartScrapeMutation,
   useListJobsQuery,

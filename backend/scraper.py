@@ -6,17 +6,19 @@ from datetime import datetime
 from pathlib import Path
 
 from scraper_config import AppConfig
+from scraper_dedupe_store import load_seen_aliases, save_seen_leads
 from scraper_exporters import append_master_csv, export_csv
 from scraper_maps import scrape_query
 from scraper_models import LeadRecord
 from scraper_utils import (
-    archive_old_exports,
+    cleanup_expired_files,
     checkpoint_path,
     compute_confidence,
     dedupe_leads,
     lead_identity_aliases,
     load_checkpoint,
     normalize_lead,
+    path_expiration,
     save_checkpoint,
     setup_logger,
     slugify,
@@ -68,9 +70,11 @@ def run_query(
     started = time.time()
     run_at = datetime.now()
     checkpoint_file = checkpoint_path(checkpoints_dir, query)
+    dedupe_db = Path(cfg.dedupe_db_path)
     existing: list[LeadRecord] = []
     resumed_card_keys: set[str] = set()
     resumed_lead_keys: set[str] = set()
+    persisted_seen_aliases = load_seen_aliases(dedupe_db)
     if resume:
         checkpoint_state = load_checkpoint(checkpoint_file, query)
         existing = dedupe_leads(checkpoint_state.leads)
@@ -87,6 +91,13 @@ def run_query(
                 len(resumed_lead_keys),
                 len(resumed_card_keys),
             )
+    resumed_lead_keys.update(persisted_seen_aliases)
+    if persisted_seen_aliases:
+        logger.info(
+            "Loaded %s persistent dedupe aliases from the global SQLite store for query='%s'",
+            len(persisted_seen_aliases),
+            query,
+        )
 
     latest_checkpoint_state = {
         "lead_keys": set(resumed_lead_keys),
@@ -123,6 +134,14 @@ def run_query(
             end_reason=None,
             message=f"Loaded {len(existing)} leads from checkpoint",
         )
+    if persisted_seen_aliases:
+        emit_progress(
+            phase="dedupe_memory_loaded",
+            leads_collected=len(existing),
+            leads_target=cfg.max_results_per_query,
+            end_reason=None,
+            message=f"Loaded {len(persisted_seen_aliases)} global persistent dedupe keys",
+        )
 
     leads = scrape_query(
         query=query,
@@ -136,8 +155,24 @@ def run_query(
         checkpoint_callback=persist_checkpoint,
         progress_callback=progress_callback,
     )
-    all_leads = dedupe_leads(existing + leads)
-    logger.info("query=%s scrape_merge existing=%s new=%s merged=%s", query, len(existing), len(leads), len(all_leads))
+    fresh_leads: list[LeadRecord] = []
+    skipped_persisted = 0
+    for lead in leads:
+        aliases = lead_identity_aliases(lead)
+        if resumed_lead_keys.intersection(aliases):
+            skipped_persisted += 1
+            continue
+        fresh_leads.append(lead)
+
+    all_leads = dedupe_leads(existing + fresh_leads)
+    logger.info(
+        "query=%s scrape_merge existing=%s new=%s skipped_persisted=%s merged=%s",
+        query,
+        len(existing),
+        len(leads),
+        skipped_persisted,
+        len(all_leads),
+    )
     emit_progress(
         phase="scrape_merged",
         leads_collected=len(all_leads),
@@ -177,7 +212,9 @@ def run_query(
     query_slug = slugify(query)
     csv_path = output_dir / f"leads_{query_slug}_{timestamp}.csv"
     export_csv(all_leads, csv_path)
-    append_master_csv(all_leads, output_dir / "master_leads.csv")
+    if cfg.enable_master_csv:
+        append_master_csv(all_leads, output_dir / "master_leads.csv")
+    save_seen_leads(dedupe_db, all_leads)
     final_lead_keys: set[str] = set()
     for lead in all_leads:
         final_lead_keys.update(lead_identity_aliases(lead))
@@ -193,8 +230,17 @@ def run_query(
         leads_collected=len(all_leads),
         leads_target=cfg.max_results_per_query,
         end_reason=None,
-        message=f"Exported CSV with {len(all_leads)} leads",
+        message=(
+            f"Exported temporary CSV with {len(all_leads)} leads"
+            if cfg.export_retention_minutes > 0
+            else f"Exported CSV with {len(all_leads)} leads"
+        ),
         csv_path=str(csv_path),
+        export_expires_at=(
+            path_expiration(csv_path, cfg.export_retention_minutes).isoformat()
+            if cfg.export_retention_minutes > 0
+            else None
+        ),
         elapsed_seconds=round(elapsed, 1),
     )
     return all_leads, elapsed, csv_path
@@ -208,7 +254,11 @@ def main() -> None:
     output_dir = Path(cfg.output_dir)
     checkpoints_dir = Path(cfg.checkpoint_dir)
     logger = setup_logger(Path(cfg.logs_dir), run_id)
-    archive_old_exports(output_dir, cfg.archive_after_days)
+    cleanup_expired_files(
+        [output_dir, checkpoints_dir, Path(cfg.logs_dir)],
+        cfg.export_retention_minutes,
+        ["leads_*.csv", "*.json", "*.log"],
+    )
 
     total_leads = 0
     total_enriched_email = 0

@@ -1,11 +1,14 @@
 "use client";
 
 import { MagnifyingGlass, Heart } from "@phosphor-icons/react";
-import { useGetHealthQuery } from "@/lib/scraper-api";
+import { useGetDedupeStatusQuery, useGetHealthQuery } from "@/lib/scraper-api";
 import { Badge } from "@/components/ui/badge";
 
 export function Header() {
   const { data: health } = useGetHealthQuery(undefined, {
+    pollingInterval: 30000,
+  });
+  const { data: dedupeStatus } = useGetDedupeStatusQuery(undefined, {
     pollingInterval: 30000,
   });
 
@@ -26,6 +29,11 @@ export function Header() {
           </div>
         </div>
         <div className="flex items-center gap-3">
+          {dedupeStatus ? (
+            <Badge variant="secondary" className="font-mono text-xs">
+              Dedupe keys: {dedupeStatus.alias_count.toLocaleString()}
+            </Badge>
+          ) : null}
           {health ? (
             <Badge variant="outline" className="gap-1.5">
               <Heart className="size-3 text-green-500" weight="fill" />

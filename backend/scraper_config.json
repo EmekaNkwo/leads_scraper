@@ -8,7 +8,9 @@
   "output_dir": "csv_exports",
   "logs_dir": "logs",
   "checkpoint_dir": "checkpoints",
-  "archive_after_days": 14,
+  "dedupe_db_path": "checkpoints/seen_leads.sqlite3",
+  "export_retention_minutes": 60,
   "headless": true,
-  "enrich_websites": true
+  "enrich_websites": true,
+  "enable_master_csv": false
 }

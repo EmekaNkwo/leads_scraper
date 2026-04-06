@@ -18,6 +18,7 @@ export interface QueryResult {
   leads_count: number;
   elapsed_seconds: number;
   csv_path: string;
+  export_expires_at: string | null;
   error: string | null;
 }
 
@@ -34,6 +35,7 @@ export interface JobProgress {
   end_reason: string | null;
   elapsed_seconds: number | null;
   csv_path: string | null;
+  export_expires_at: string | null;
   updated_at: string | null;
 }
 
@@ -55,6 +57,9 @@ export interface JobStatus {
   };
   progress: JobProgress | null;
   recent_events: string[];
+  export_retention_minutes: number;
+  exports_are_temporary: boolean;
+  master_csv_enabled: boolean;
 }
 
 export interface ScrapeRequest {
@@ -71,6 +76,7 @@ export interface ExportFile {
   filename: string;
   size_bytes: number;
   modified_at: string;
+  expires_at: string | null;
 }
 
 export interface AppConfig {
@@ -81,13 +87,18 @@ export interface AppConfig {
   output_dir: string;
   logs_dir: string;
   checkpoint_dir: string;
-  archive_after_days: number;
+  export_retention_minutes: number;
   headless: boolean;
   enrich_websites: boolean;
+  enable_master_csv: boolean;
 }
 
 export interface HealthStatus {
   status: string;
   version: string;
   uptime_seconds: number;
+}
+
+export interface DedupeStatus {
+  alias_count: number;
 }

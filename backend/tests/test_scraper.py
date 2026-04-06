@@ -24,7 +24,9 @@ def test_run_query_exports_csv_only_and_updates_checkpoint(tmp_path: Path, monke
         output_dir=str(tmp_path / "exports"),
         checkpoint_dir=str(tmp_path / "checkpoints"),
         logs_dir=str(tmp_path / "logs"),
+        dedupe_db_path=str(tmp_path / "checkpoints" / "seen_leads.sqlite3"),
         enrich_websites=False,
+        enable_master_csv=True,
     )
     logger = scraper.setup_logger(tmp_path / "logs", "test_run")
 
@@ -42,6 +44,7 @@ def test_run_query_exports_csv_only_and_updates_checkpoint(tmp_path: Path, monke
     assert list((tmp_path / "exports").glob("*.json")) == []
     checkpoint_files = list((tmp_path / "checkpoints").glob("*.json"))
     assert len(checkpoint_files) == 1
+    assert (tmp_path / "exports" / "master_leads.csv").exists()
 
 
 def test_run_query_resume_dedupes_checkpoint_and_new_results(tmp_path: Path, monkeypatch):
@@ -93,6 +96,7 @@ def test_run_query_resume_dedupes_checkpoint_and_new_results(tmp_path: Path, mon
         output_dir=str(tmp_path / "exports"),
         checkpoint_dir=str(checkpoint_dir),
         logs_dir=str(tmp_path / "logs"),
+        dedupe_db_path=str(checkpoint_dir / "seen_leads.sqlite3"),
         enrich_websites=False,
     )
     logger = scraper.setup_logger(tmp_path / "logs", "resume_run")
@@ -107,3 +111,99 @@ def test_run_query_resume_dedupes_checkpoint_and_new_results(tmp_path: Path, mon
     )
 
     assert len(leads) == 2
+
+
+def test_run_query_skips_master_csv_when_disabled(tmp_path: Path, monkeypatch):
+    def fake_scrape_query(**_kwargs):
+        return [
+            LeadRecord(
+                query="electronics store lagos",
+                name="Shop",
+                phone="0800 000 0000",
+                address="Somewhere",
+                maps_url="https://maps.google.com/?cid=123",
+            )
+        ]
+
+    monkeypatch.setattr(scraper, "scrape_query", fake_scrape_query)
+
+    cfg = AppConfig(
+        queries=["electronics store lagos"],
+        output_dir=str(tmp_path / "exports"),
+        checkpoint_dir=str(tmp_path / "checkpoints"),
+        logs_dir=str(tmp_path / "logs"),
+        dedupe_db_path=str(tmp_path / "checkpoints" / "seen_leads.sqlite3"),
+        enrich_websites=False,
+        enable_master_csv=False,
+    )
+    logger = scraper.setup_logger(tmp_path / "logs", "no_master")
+
+    leads, _elapsed, csv_path = scraper.run_query(
+        query="electronics store lagos",
+        cfg=cfg,
+        output_dir=Path(cfg.output_dir),
+        checkpoints_dir=Path(cfg.checkpoint_dir),
+        logger=logger,
+        resume=False,
+    )
+
+    assert len(leads) == 1
+    assert csv_path.exists()
+    assert not (tmp_path / "exports" / "master_leads.csv").exists()
+
+
+def test_run_query_skips_leads_seen_in_sqlite_store(tmp_path: Path, monkeypatch):
+    def fake_scrape_query(**_kwargs):
+        return [
+            LeadRecord(
+                query="electronics store lagos",
+                name="Shop",
+                phone="0800 000 0000",
+                address="Somewhere",
+                maps_url="https://maps.google.com/?cid=123",
+            ),
+            LeadRecord(
+                query="electronics store lagos",
+                name="Second Shop",
+                phone="0900 000 0000",
+                address="Elsewhere",
+                maps_url="https://maps.google.com/?cid=999",
+            ),
+        ]
+
+    monkeypatch.setattr(scraper, "scrape_query", fake_scrape_query)
+
+    cfg = AppConfig(
+        queries=["electronics store lagos"],
+        output_dir=str(tmp_path / "exports"),
+        checkpoint_dir=str(tmp_path / "checkpoints"),
+        logs_dir=str(tmp_path / "logs"),
+        dedupe_db_path=str(tmp_path / "checkpoints" / "seen_leads.sqlite3"),
+        enrich_websites=False,
+        enable_master_csv=False,
+    )
+    logger = scraper.setup_logger(tmp_path / "logs", "sqlite_seen")
+
+    scraper.save_seen_leads(
+        Path(cfg.dedupe_db_path),
+        [
+            LeadRecord(
+                query="electronics store lagos",
+                name="Shop",
+                phone="0800 000 0000",
+                address="Somewhere",
+                maps_url="https://maps.google.com/?cid=123",
+            )
+        ],
+    )
+
+    leads, _elapsed, _csv_path = scraper.run_query(
+        query="electronics store lagos",
+        cfg=cfg,
+        output_dir=Path(cfg.output_dir),
+        checkpoints_dir=Path(cfg.checkpoint_dir),
+        logger=logger,
+        resume=False,
+    )
+
+    assert [lead.name for lead in leads] == ["Second Shop"]

@@ -171,15 +171,48 @@ def setup_logger(logs_dir: Path, run_id: str) -> logging.Logger:
     return logger
 
 
-def archive_old_exports(output_dir: Path, days: int) -> None:
-    archive_dir = output_dir / "archive"
-    archive_dir.mkdir(parents=True, exist_ok=True)
-    cutoff = datetime.now() - timedelta(days=days)
+def retention_deadline(created_at: datetime, retention_minutes: int) -> datetime | None:
+    if retention_minutes <= 0:
+        return None
+    return created_at + timedelta(minutes=retention_minutes)
 
-    for csv_file in output_dir.glob("*.csv"):
-        modified = datetime.fromtimestamp(csv_file.stat().st_mtime)
-        if modified < cutoff:
-            csv_file.rename(archive_dir / csv_file.name)
+
+def path_expiration(path: Path, retention_minutes: int) -> datetime | None:
+    if retention_minutes <= 0 or not path.exists():
+        return None
+    modified = datetime.fromtimestamp(path.stat().st_mtime)
+    return retention_deadline(modified, retention_minutes)
+
+
+def cleanup_expired_files(
+    paths: list[Path],
+    retention_minutes: int,
+    patterns: list[str],
+    protected_paths: set[Path] | None = None,
+) -> int:
+    if retention_minutes <= 0:
+        return 0
+
+    cutoff = datetime.now() - timedelta(minutes=retention_minutes)
+    deleted = 0
+    seen: set[Path] = set()
+    protected = {path.resolve() for path in (protected_paths or set()) if path.exists()}
+    for root in paths:
+        if not root.exists():
+            continue
+        for pattern in patterns:
+            for file_path in root.glob(pattern):
+                if file_path in seen or not file_path.is_file():
+                    continue
+                seen.add(file_path)
+                if file_path.resolve() in protected:
+                    continue
+                modified = datetime.fromtimestamp(file_path.stat().st_mtime)
+                if modified >= cutoff:
+                    continue
+                file_path.unlink(missing_ok=True)
+                deleted += 1
+    return deleted
 
 
 def checkpoint_path(checkpoint_dir: Path, query: str) -> Path:

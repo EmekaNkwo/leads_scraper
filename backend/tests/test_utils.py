@@ -1,7 +1,10 @@
+from datetime import datetime, timedelta
+
 from scraper_models import LeadRecord
 from scraper_utils import (
     CheckpointState,
     canonicalize_url,
+    cleanup_expired_files,
     compute_confidence,
     lead_identity_key,
     load_checkpoint,
@@ -72,3 +75,33 @@ def test_checkpoint_round_trip_and_legacy_compatibility(tmp_path):
     assert len(legacy_state.leads) == 1
     assert legacy_state.card_keys == set()
     assert len(legacy_state.lead_keys) == 1
+
+
+def test_cleanup_expired_files_removes_old_files_and_keeps_recent(tmp_path):
+    csv_file = tmp_path / "leads_recent.csv"
+    old_log = tmp_path / "run_old.log"
+    old_checkpoint = tmp_path / "query.json"
+
+    csv_file.write_text("query,name\nq,shop\n", encoding="utf-8")
+    old_log.write_text("old log", encoding="utf-8")
+    old_checkpoint.write_text("{}", encoding="utf-8")
+
+    stale_time = (datetime.now() - timedelta(minutes=120)).timestamp()
+    recent_time = (datetime.now() - timedelta(minutes=5)).timestamp()
+
+    old_log.touch()
+    old_checkpoint.touch()
+    csv_file.touch()
+
+    import os
+
+    os.utime(old_log, (stale_time, stale_time))
+    os.utime(old_checkpoint, (stale_time, stale_time))
+    os.utime(csv_file, (recent_time, recent_time))
+
+    deleted = cleanup_expired_files([tmp_path], retention_minutes=60, patterns=["*.csv", "*.log", "*.json"])
+
+    assert deleted == 2
+    assert csv_file.exists()
+    assert not old_log.exists()
+    assert not old_checkpoint.exists()

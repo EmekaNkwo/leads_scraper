@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,9 +15,14 @@ class AppConfig:
     output_dir: str = "csv_exports"
     logs_dir: str = "logs"
     checkpoint_dir: str = "checkpoints"
-    archive_after_days: int = 14
+    dedupe_db_path: str = "checkpoints/seen_leads.sqlite3"
+    export_retention_minutes: int = 60
     headless: bool = True
     enrich_websites: bool = True
+    enable_master_csv: bool = field(
+        default_factory=lambda: os.getenv("ENABLE_MASTER_CSV", "false").strip().lower()
+        not in {"0", "false", "no", "off"}
+    )
 
     @classmethod
     def from_file(cls, path: str | None) -> "AppConfig":
