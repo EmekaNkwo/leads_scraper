@@ -50,7 +50,7 @@ leads_scraper/
 Install these before setup:
 
 - Python 3.10 or newer
-- Node.js 18 or newer
+- Node.js 20.9 or newer
 - `pnpm`
 - Playwright Chromium dependencies for your OS
 

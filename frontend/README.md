@@ -1,36 +1,122 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Frontend
 
-## Getting Started
+This is the Next.js dashboard for the `leads_scraper` app. It provides the UI for:
 
-First, run the development server:
+- starting scrape jobs
+- tracking live job progress
+- resuming from checkpoints
+- cancelling running jobs
+- reviewing job history
+- downloading completed CSV exports
+
+The frontend talks to the FastAPI backend and is not meant to run by itself without the scraper API.
+
+## Prerequisites
+
+- Node.js 20.9+
+- `pnpm`
+- the backend API running locally or reachable over HTTP
+
+Install `pnpm` if needed:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install -g pnpm
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Install
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+From the `frontend/` directory:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+pnpm install
+```
 
-## Learn More
+Or from the repo root:
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+./run.sh install
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+On Windows:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bat
+run.bat install
+```
 
-## Deploy on Vercel
+## Development
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Start the frontend dev server:
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+pnpm dev
+```
+
+Open `http://localhost:3000`.
+
+## Backend Connection
+
+The frontend rewrites `/api/*` requests to the backend defined by `BACKEND_URL`.
+
+Default backend:
+
+```text
+http://127.0.0.1:8000
+```
+
+This comes from `next.config.ts`.
+
+If your backend is running somewhere else, set `BACKEND_URL` before starting the frontend from the `frontend/` directory.
+
+macOS / Linux:
+
+```bash
+BACKEND_URL=http://127.0.0.1:8000 pnpm dev
+```
+
+Windows Command Prompt:
+
+```bat
+set BACKEND_URL=http://127.0.0.1:8000 && pnpm dev
+```
+
+Windows PowerShell:
+
+```powershell
+$env:BACKEND_URL="http://127.0.0.1:8000"
+pnpm dev
+```
+
+## Typical Local Workflow
+
+From the repo root:
+
+macOS / Linux:
+
+```bash
+./run.sh stack
+```
+
+Windows, using two terminals:
+
+```bat
+run.bat api
+run.bat dev
+```
+
+That gives you:
+
+- frontend at `http://localhost:3000`
+- backend docs at `http://127.0.0.1:8000/docs`
+
+## Available Scripts
+
+- `pnpm dev`: start the Next.js development server
+- `pnpm build`: create a production build
+- `pnpm start`: run the production server
+- `pnpm lint`: run ESLint
+
+## Notes
+
+- The frontend expects the backend job API to be available.
+- Active and recent jobs come from the backend's in-memory job store, so a backend restart clears existing job IDs.
+- For full project setup, backend install steps, and deployment notes, see the repo root `README.md`.
