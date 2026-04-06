@@ -15,6 +15,7 @@ export interface Lead {
 
 export interface QueryResult {
   query: string;
+  status: "completed" | "failed" | "cancelled";
   leads_count: number;
   elapsed_seconds: number;
   csv_path: string;
@@ -41,7 +42,7 @@ export interface JobProgress {
 
 export interface JobStatus {
   job_id: string;
-  status: "pending" | "running" | "completed" | "failed";
+  status: "pending" | "running" | "completed" | "failed" | "cancelled";
   created_at: string;
   completed_at: string | null;
   queries_total: number;
@@ -54,6 +55,7 @@ export interface JobStatus {
     websites_found: number;
     queries_succeeded: number;
     queries_failed: number;
+    queries_cancelled: number;
   };
   progress: JobProgress | null;
   recent_events: string[];

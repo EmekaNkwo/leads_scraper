@@ -46,10 +46,14 @@ def _extract_owner(text: str) -> str:
     return "N/A"
 
 
-def enrich_from_websites(leads: list[LeadRecord], max_pages_per_site: int = 4) -> None:
+def enrich_from_websites(leads: list[LeadRecord], max_pages_per_site: int = 4, should_cancel=None) -> None:
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
+    cancelled = False
     for lead in leads:
+        if should_cancel and should_cancel():
+            cancelled = True
+            break
         if lead.website == "N/A":
             continue
         if lead.email != "N/A" and lead.owner_name != "N/A":
@@ -58,6 +62,9 @@ def enrich_from_websites(leads: list[LeadRecord], max_pages_per_site: int = 4) -
         visited: set[str] = set()
         queue = _candidate_urls(lead.website)
         while queue and len(visited) < max_pages_per_site:
+            if should_cancel and should_cancel():
+                cancelled = True
+                break
             url = queue.pop(0)
             if url in visited:
                 continue
@@ -97,4 +104,6 @@ def enrich_from_websites(leads: list[LeadRecord], max_pages_per_site: int = 4) -
             lead.social_links = list(dict.fromkeys(lead.social_links))
             if lead.email != "N/A" and lead.owner_name != "N/A":
                 break
+        if cancelled:
+            break
 

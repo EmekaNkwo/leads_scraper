@@ -7,7 +7,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -66,6 +66,7 @@ class LeadOut(BaseModel):
 
 class QueryResult(BaseModel):
     query: str
+    status: str = Field(description="completed | failed | cancelled")
     leads_count: int
     elapsed_seconds: float
     csv_path: str
@@ -92,7 +93,7 @@ class JobProgress(BaseModel):
 
 class JobStatus(BaseModel):
     job_id: str
-    status: str = Field(description="pending | running | completed | failed")
+    status: str = Field(description="pending | running | completed | failed | cancelled")
     created_at: str
     completed_at: str | None = None
     queries: list[str] = Field(default_factory=list)
@@ -144,6 +145,7 @@ class DedupeStatusOut(BaseModel):
 # ---------------------------------------------------------------------------
 
 _jobs: dict[str, JobStatus] = {}
+_job_cancel_events: dict[str, Event] = {}
 _jobs_lock = Lock()
 _start_time = time.time()
 
@@ -182,6 +184,58 @@ def _cleanup_runtime_files(cfg: AppConfig, include_all: bool = True) -> int:
     )
 
 
+def _build_job_summary(job: JobStatus) -> dict[str, int]:
+    return {
+        "total_leads": len(job.leads),
+        "emails_found": sum(1 for lead in job.leads if lead.email != "N/A"),
+        "websites_found": sum(1 for lead in job.leads if lead.website != "N/A"),
+        "queries_succeeded": sum(1 for result in job.results if result.status == "completed"),
+        "queries_failed": sum(1 for result in job.results if result.status == "failed"),
+        "queries_cancelled": sum(1 for result in job.results if result.status == "cancelled"),
+    }
+
+
+def _is_cancel_requested(job_id: str) -> bool:
+    cancel_event = _job_cancel_events.get(job_id)
+    return cancel_event.is_set() if cancel_event else False
+
+
+def _update_job_progress(job: JobStatus, update: dict[str, object]) -> None:
+    previous = job.progress or JobProgress()
+    message = update.get("message")
+    if "end_reason" in update:
+        if update["end_reason"] is not None:
+            end_reason = str(update["end_reason"])
+        elif previous.end_reason == "cancel_requested":
+            end_reason = previous.end_reason
+        else:
+            end_reason = None
+    else:
+        end_reason = previous.end_reason
+    job.progress = JobProgress(
+        query=str(update.get("query")) if update.get("query") is not None else previous.query,
+        phase=str(update.get("phase", previous.phase)),
+        leads_collected=int(update.get("leads_collected", previous.leads_collected)),
+        leads_target=int(update.get("leads_target", previous.leads_target)),
+        visible_cards=int(update.get("visible_cards", previous.visible_cards)),
+        scrolls_used=int(update.get("scrolls_used", previous.scrolls_used)),
+        max_scrolls=int(update.get("max_scrolls", previous.max_scrolls)),
+        stale_scrolls=int(update.get("stale_scrolls", previous.stale_scrolls)),
+        message=str(message) if message is not None else previous.message,
+        end_reason=end_reason,
+        elapsed_seconds=float(update.get("elapsed_seconds")) if update.get("elapsed_seconds") is not None else previous.elapsed_seconds,
+        csv_path=str(update.get("csv_path")) if update.get("csv_path") is not None else previous.csv_path,
+        export_expires_at=(
+            str(update.get("export_expires_at"))
+            if update.get("export_expires_at") is not None
+            else previous.export_expires_at
+        ),
+        updated_at=datetime.now().isoformat(),
+    )
+    if message is not None:
+        job.recent_events = (job.recent_events + [str(message)])[-8:]
+
+
 def _lead_to_out(lead: LeadRecord) -> LeadOut:
     return LeadOut(
         query=lead.query,
@@ -200,126 +254,153 @@ def _lead_to_out(lead: LeadRecord) -> LeadOut:
 
 
 def _run_job(job_id: str, req: ScrapeRequest) -> None:
-    with _jobs_lock:
-        job = _jobs[job_id]
-        job.status = "running"
-
-    cfg = _load_runtime_config()
-    cfg.queries = req.queries
-    cfg.max_results_per_query = req.max_results_per_query
-    cfg.max_scrolls_per_query = req.max_scrolls_per_query
-    cfg.max_runtime_seconds = req.max_runtime_seconds
-    cfg.headless = req.headless
-    cfg.enrich_websites = req.enrich_websites
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    logger = setup_logger(Path(cfg.logs_dir), run_id)
-    output_dir = Path(cfg.output_dir)
-    checkpoints_dir = Path(cfg.checkpoint_dir)
-    _cleanup_runtime_files(cfg)
-
-    total_leads = 0
-    total_emails = 0
-    total_websites = 0
-
-    def update_progress(update: dict[str, object]) -> None:
+    try:
         with _jobs_lock:
-            previous = job.progress or JobProgress()
-            message = update.get("message")
-            if "end_reason" in update:
-                end_reason = str(update["end_reason"]) if update["end_reason"] is not None else None
+            job = _jobs[job_id]
+            if _is_cancel_requested(job_id):
+                job.status = "cancelled"
+                job.completed_at = datetime.now().isoformat()
+                _update_job_progress(
+                    job,
+                    {
+                        "query": job.queries[0] if job.queries else None,
+                        "phase": "cancelled",
+                        "message": "Job cancelled before it started.",
+                        "end_reason": "cancel_requested",
+                    },
+                )
+                return
+            job.status = "running"
+
+        cfg = _load_runtime_config()
+        cfg.queries = req.queries
+        cfg.max_results_per_query = req.max_results_per_query
+        cfg.max_scrolls_per_query = req.max_scrolls_per_query
+        cfg.max_runtime_seconds = req.max_runtime_seconds
+        cfg.headless = req.headless
+        cfg.enrich_websites = req.enrich_websites
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        logger = setup_logger(Path(cfg.logs_dir), run_id)
+        output_dir = Path(cfg.output_dir)
+        checkpoints_dir = Path(cfg.checkpoint_dir)
+        _cleanup_runtime_files(cfg)
+
+        def update_progress(update: dict[str, object]) -> None:
+            with _jobs_lock:
+                job = _jobs.get(job_id)
+                if job is None:
+                    return
+                _update_job_progress(job, update)
+
+        for query in cfg.queries:
+            if _is_cancel_requested(job_id):
+                update_progress(
+                    {
+                        "query": query,
+                        "phase": "cancel_requested",
+                        "message": "Cancellation requested. Stopping job...",
+                        "end_reason": "cancel_requested",
+                    }
+                )
+                break
+            try:
+                leads, elapsed, csv_path = run_query(
+                    query=query,
+                    cfg=cfg,
+                    output_dir=output_dir,
+                    checkpoints_dir=checkpoints_dir,
+                    logger=logger,
+                    resume=req.resume,
+                    progress_callback=update_progress,
+                    should_cancel=lambda: _is_cancel_requested(job_id),
+                )
+                with _jobs_lock:
+                    job = _jobs[job_id]
+                    job.leads.extend([_lead_to_out(l) for l in leads])
+                    job.results.append(
+                        QueryResult(
+                            query=query,
+                            status="cancelled" if _is_cancel_requested(job_id) else "completed",
+                            leads_count=len(leads),
+                            elapsed_seconds=round(elapsed, 1),
+                            csv_path=str(csv_path),
+                            export_expires_at=(
+                                path_expiration(Path(csv_path), cfg.export_retention_minutes).isoformat()
+                                if cfg.export_retention_minutes > 0
+                                else None
+                            ),
+                        )
+                    )
+            except Exception as exc:
+                with _jobs_lock:
+                    job = _jobs[job_id]
+                    job.results.append(
+                        QueryResult(
+                            query=query,
+                            status="cancelled" if _is_cancel_requested(job_id) else "failed",
+                            leads_count=0,
+                            elapsed_seconds=0,
+                            csv_path="",
+                            error=str(exc),
+                        )
+                    )
+                update_progress(
+                    {
+                        "query": query,
+                        "phase": "query_failed",
+                        "message": f"Query failed: {exc}",
+                        "end_reason": None,
+                    }
+                )
+            with _jobs_lock:
+                job = _jobs.get(job_id)
+                if job is not None:
+                    job.queries_done += 1
+            if _is_cancel_requested(job_id):
+                break
+
+        with _jobs_lock:
+            job = _jobs[job_id]
+            job.summary = _build_job_summary(job)
+            job.completed_at = datetime.now().isoformat()
+            if _is_cancel_requested(job_id):
+                job.status = "cancelled"
+                final_message = f"Job cancelled with {job.summary['total_leads']} total leads"
+                end_reason = "cancel_requested"
             else:
-                end_reason = previous.end_reason
-            job.progress = JobProgress(
-                query=str(update.get("query")) if update.get("query") is not None else previous.query,
-                phase=str(update.get("phase", previous.phase)),
-                leads_collected=int(update.get("leads_collected", previous.leads_collected)),
-                leads_target=int(update.get("leads_target", previous.leads_target)),
-                visible_cards=int(update.get("visible_cards", previous.visible_cards)),
-                scrolls_used=int(update.get("scrolls_used", previous.scrolls_used)),
-                max_scrolls=int(update.get("max_scrolls", previous.max_scrolls)),
-                stale_scrolls=int(update.get("stale_scrolls", previous.stale_scrolls)),
-                message=str(message) if message is not None else previous.message,
-                end_reason=end_reason,
-                elapsed_seconds=float(update.get("elapsed_seconds")) if update.get("elapsed_seconds") is not None else previous.elapsed_seconds,
-                csv_path=str(update.get("csv_path")) if update.get("csv_path") is not None else previous.csv_path,
-                export_expires_at=(
-                    str(update.get("export_expires_at"))
-                    if update.get("export_expires_at") is not None
-                    else previous.export_expires_at
-                ),
-                updated_at=datetime.now().isoformat(),
-            )
-            if message is not None:
-                job.recent_events = (job.recent_events + [str(message)])[-8:]
-
-    for query in cfg.queries:
-        try:
-            leads, elapsed, csv_path = run_query(
-                query=query,
-                cfg=cfg,
-                output_dir=output_dir,
-                checkpoints_dir=checkpoints_dir,
-                logger=logger,
-                resume=req.resume,
-                progress_callback=update_progress,
-            )
-            with _jobs_lock:
-                job.leads.extend([_lead_to_out(l) for l in leads])
-                job.results.append(
-                    QueryResult(
-                        query=query,
-                        leads_count=len(leads),
-                        elapsed_seconds=round(elapsed, 1),
-                        csv_path=str(csv_path),
-                        export_expires_at=(
-                            path_expiration(Path(csv_path), cfg.export_retention_minutes).isoformat()
-                            if cfg.export_retention_minutes > 0
-                            else None
-                        ),
-                    )
-                )
-            total_leads += len(leads)
-            total_emails += sum(1 for l in leads if l.email != "N/A")
-            total_websites += sum(1 for l in leads if l.website != "N/A")
-        except Exception as exc:
-            with _jobs_lock:
-                job.results.append(
-                    QueryResult(
-                        query=query,
-                        leads_count=0,
-                        elapsed_seconds=0,
-                        csv_path="",
-                        error=str(exc),
-                    )
-                )
-            update_progress(
-                {
-                    "query": query,
-                    "phase": "query_failed",
-                    "message": f"Query failed: {exc}",
-                    "end_reason": None,
-                }
-            )
+                job.status = "failed" if job.results and all(r.error for r in job.results) else "completed"
+                final_message = f"Job {job.status} with {job.summary['total_leads']} total leads"
+                end_reason = None
+        update_progress(
+            {
+                "phase": job.status,
+                "message": final_message,
+                "end_reason": end_reason,
+            }
+        )
+    except Exception as exc:
         with _jobs_lock:
-            job.queries_done += 1
-
-    with _jobs_lock:
-        job.summary = {
-            "total_leads": total_leads,
-            "emails_found": total_emails,
-            "websites_found": total_websites,
-            "queries_succeeded": sum(1 for r in job.results if r.error is None),
-            "queries_failed": sum(1 for r in job.results if r.error is not None),
-        }
-        job.completed_at = datetime.now().isoformat()
-        job.status = "failed" if all(r.error for r in job.results) else "completed"
-    update_progress(
-        {
-            "phase": job.status,
-            "message": f"Job {job.status} with {total_leads} total leads",
-            "end_reason": None,
-        }
-    )
+            job = _jobs.get(job_id)
+            if job is not None:
+                job.summary = _build_job_summary(job)
+                job.completed_at = datetime.now().isoformat()
+                job.status = "cancelled" if _is_cancel_requested(job_id) else "failed"
+                _update_job_progress(
+                    job,
+                    {
+                        "query": job.progress.query if job.progress else (job.queries[0] if job.queries else None),
+                        "phase": job.status,
+                        "message": (
+                            "Job cancelled."
+                            if job.status == "cancelled"
+                            else f"Job failed unexpectedly: {exc}"
+                        ),
+                        "end_reason": "cancel_requested" if job.status == "cancelled" else "unexpected_error",
+                    },
+                )
+    finally:
+        with _jobs_lock:
+            _job_cancel_events.pop(job_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +470,7 @@ def start_scrape(req: ScrapeRequest):
     )
     with _jobs_lock:
         _jobs[job_id] = job
+        _job_cancel_events[job_id] = Event()
     Thread(target=_run_job, args=(job_id, req), daemon=True).start()
     return job
 
@@ -408,9 +490,49 @@ def get_job(job_id: str):
     return job.model_copy(deep=True)
 
 
+@app.delete("/scrape/{job_id}", response_model=JobStatus, status_code=202, tags=["Scraping"])
+def cancel_job(job_id: str):
+    """Request cancellation for a pending or running scraping job."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+        if job.status in {"completed", "failed", "cancelled"}:
+            return job.model_copy(deep=True)
+
+        cancel_event = _job_cancel_events.get(job_id)
+        if cancel_event is not None:
+            cancel_event.set()
+
+        if job.status == "pending":
+            job.status = "cancelled"
+            job.completed_at = datetime.now().isoformat()
+            job.summary = _build_job_summary(job)
+            _update_job_progress(
+                job,
+                {
+                    "query": job.queries[0] if job.queries else None,
+                    "phase": "cancelled",
+                    "message": "Job cancelled before it started.",
+                    "end_reason": "cancel_requested",
+                },
+            )
+        else:
+            _update_job_progress(
+                job,
+                {
+                    "query": job.progress.query if job.progress else (job.queries[0] if job.queries else None),
+                    "phase": "cancel_requested",
+                    "message": "Cancellation requested. Stopping job...",
+                    "end_reason": "cancel_requested",
+                },
+            )
+        return job.model_copy(deep=True)
+
+
 @app.get("/scrape", response_model=list[JobStatus], tags=["Scraping"])
 def list_jobs(
-    status: str | None = Query(None, description="Filter by status: pending, running, completed, failed"),
+    status: str | None = Query(None, description="Filter by status: pending, running, completed, failed, cancelled"),
     limit: int = Query(20, ge=1, le=100, description="Max jobs to return"),
 ):
     """List all scraping jobs, optionally filtered by status."""
@@ -481,7 +603,7 @@ def download_job_csv(job_id: str):
         job = _jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
-    if job.status not in ("completed", "failed"):
+    if job.status not in ("completed", "failed", "cancelled"):
         raise HTTPException(status_code=409, detail="Job has not finished yet.")
     if not job.leads:
         raise HTTPException(status_code=404, detail="No leads in this job.")

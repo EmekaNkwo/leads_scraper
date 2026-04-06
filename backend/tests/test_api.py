@@ -1,6 +1,7 @@
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
+from threading import Event
 
 from fastapi.testclient import TestClient
 
@@ -76,6 +77,7 @@ def test_list_exports_keeps_running_job_export_file(tmp_path: Path, monkeypatch)
         results=[
             api.QueryResult(
                 query="electronics store lagos",
+                status="completed",
                 leads_count=1,
                 elapsed_seconds=10.0,
                 csv_path=str(protected),
@@ -120,6 +122,7 @@ def test_download_job_csv_uses_query_and_timestamp_filename():
         results=[
             api.QueryResult(
                 query="electronics store lagos",
+                status="completed",
                 leads_count=1,
                 elapsed_seconds=10.0,
                 csv_path="csv_exports/leads_electronics-store-lagos.csv",
@@ -155,6 +158,100 @@ def test_download_job_csv_uses_query_and_timestamp_filename():
     )
     with api._jobs_lock:
         api._jobs.pop(job.job_id, None)
+
+
+def test_download_job_csv_allows_cancelled_jobs_with_leads():
+    client = TestClient(api.app)
+    job = api.JobStatus(
+        job_id="job-cancelled",
+        status="cancelled",
+        created_at="2026-04-04T03:27:42",
+        completed_at="2026-04-04T03:30:48",
+        queries_total=1,
+        queries_done=1,
+        results=[
+            api.QueryResult(
+                query="electronics store lagos",
+                status="cancelled",
+                leads_count=1,
+                elapsed_seconds=10.0,
+                csv_path="csv_exports/leads_electronics-store-lagos.csv",
+            )
+        ],
+        leads=[
+            api.LeadOut(
+                query="electronics store lagos",
+                name="Shop",
+                phone="08000000000",
+                address="Somewhere",
+                email="N/A",
+                owner_name="N/A",
+                website="N/A",
+                maps_url="N/A",
+                category="N/A",
+                social_links=[],
+                scraped_at="2026-04-04 03:30:48",
+                confidence_score=0.45,
+            )
+        ],
+        summary={"total_leads": 1, "queries_cancelled": 1},
+    )
+    with api._jobs_lock:
+        api._jobs[job.job_id] = job
+
+    response = client.get(f"/scrape/{job.job_id}/csv")
+
+    assert response.status_code == 200
+    assert response.headers["content-disposition"].startswith("attachment; filename=leads_electronics-store-lagos_")
+    with api._jobs_lock:
+        api._jobs.pop(job.job_id, None)
+
+
+def test_build_job_summary_counts_cancelled_queries():
+    job = api.JobStatus(
+        job_id="job-summary",
+        status="cancelled",
+        created_at=datetime.now().isoformat(),
+        queries=["electronics store lagos"],
+        queries_total=3,
+        results=[
+            api.QueryResult(
+                query="electronics store lagos",
+                status="completed",
+                leads_count=2,
+                elapsed_seconds=10.0,
+                csv_path="csv_exports/leads_1.csv",
+            ),
+            api.QueryResult(
+                query="computer shop ikeja",
+                status="failed",
+                leads_count=0,
+                elapsed_seconds=0.0,
+                csv_path="",
+                error="boom",
+            ),
+            api.QueryResult(
+                query="phone store yaba",
+                status="cancelled",
+                leads_count=1,
+                elapsed_seconds=5.0,
+                csv_path="csv_exports/leads_2.csv",
+            ),
+        ],
+        leads=[
+            api.LeadOut(query="electronics store lagos", name="A", phone="N/A", address="N/A", email="x@example.com", owner_name="N/A", website="https://example.com", maps_url="N/A", category="N/A", social_links=[], scraped_at="2026-04-06 13:00:00", confidence_score=0.5),
+            api.LeadOut(query="phone store yaba", name="B", phone="N/A", address="N/A", email="N/A", owner_name="N/A", website="N/A", maps_url="N/A", category="N/A", social_links=[], scraped_at="2026-04-06 13:00:00", confidence_score=0.5),
+        ],
+    )
+
+    assert api._build_job_summary(job) == {
+        "total_leads": 2,
+        "emails_found": 1,
+        "websites_found": 1,
+        "queries_succeeded": 1,
+        "queries_failed": 1,
+        "queries_cancelled": 1,
+    }
 
 
 def test_get_dedupe_status_returns_alias_count(tmp_path: Path, monkeypatch):
@@ -194,3 +291,60 @@ def test_get_dedupe_status_returns_alias_count(tmp_path: Path, monkeypatch):
     assert response.status_code == 200
     data = response.json()
     assert data == {"alias_count": 3}
+
+
+def test_cancel_running_job_requests_cancellation():
+    client = TestClient(api.app)
+    job = api.JobStatus(
+        job_id="job-cancel",
+        status="running",
+        created_at=datetime.now().isoformat(),
+        queries=["electronics store lagos"],
+        queries_total=1,
+        progress=api.JobProgress(phase="scraping", query="electronics store lagos"),
+    )
+    with api._jobs_lock:
+        api._jobs[job.job_id] = job
+        api._job_cancel_events[job.job_id] = Event()
+
+    response = client.delete(f"/scrape/{job.job_id}")
+
+    assert response.status_code == 202
+    data = response.json()
+    assert data["status"] == "running"
+    assert data["progress"]["phase"] == "cancel_requested"
+    assert data["progress"]["end_reason"] == "cancel_requested"
+    assert api._job_cancel_events[job.job_id].is_set() is True
+
+    with api._jobs_lock:
+        api._jobs.pop(job.job_id, None)
+        api._job_cancel_events.pop(job.job_id, None)
+
+
+def test_run_job_marks_failed_on_unexpected_exception(monkeypatch):
+    job_id = "job-crash"
+    request = api.ScrapeRequest(queries=["electronics store lagos"])
+    job = api.JobStatus(
+        job_id=job_id,
+        status="pending",
+        created_at=datetime.now().isoformat(),
+        queries=request.queries,
+        queries_total=1,
+    )
+
+    with api._jobs_lock:
+        api._jobs[job_id] = job
+        api._job_cancel_events[job_id] = Event()
+
+    monkeypatch.setattr(api, "_cleanup_runtime_files", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    api._run_job(job_id, request)
+
+    with api._jobs_lock:
+        failed_job = api._jobs[job_id]
+        assert failed_job.status == "failed"
+        assert failed_job.completed_at is not None
+        assert failed_job.progress is not None
+        assert failed_job.progress.end_reason == "unexpected_error"
+        assert "Job failed unexpectedly: boom" in failed_job.recent_events[-1]
+        api._jobs.pop(job_id, None)

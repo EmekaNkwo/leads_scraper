@@ -66,6 +66,7 @@ def run_query(
     logger,
     resume: bool,
     progress_callback=None,
+    should_cancel=None,
 ) -> tuple[list[LeadRecord], float, Path]:
     started = time.time()
     run_at = datetime.now()
@@ -108,6 +109,18 @@ def run_query(
         if progress_callback:
             progress_callback({"query": query, **payload})
 
+    def cancellation_requested(message: str, leads_count: int) -> bool:
+        if should_cancel and should_cancel():
+            emit_progress(
+                phase="cancel_requested",
+                leads_collected=leads_count,
+                leads_target=cfg.max_results_per_query,
+                end_reason="cancel_requested",
+                message=message,
+            )
+            return True
+        return False
+
     def persist_checkpoint(partial_leads: list[LeadRecord], lead_keys: set[str], card_keys: set[str]) -> None:
         combined = dedupe_leads(existing + partial_leads)
         latest_checkpoint_state["lead_keys"] = set(lead_keys)
@@ -142,6 +155,14 @@ def run_query(
             end_reason=None,
             message=f"Loaded {len(persisted_seen_aliases)} global persistent dedupe keys",
         )
+    if cancellation_requested("Cancellation requested before scraping started.", len(existing)):
+        elapsed = time.time() - started
+        output_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = run_at.strftime("%Y-%m-%d_%I-%M-%S%p").lower()
+        query_slug = slugify(query)
+        csv_path = output_dir / f"leads_{query_slug}_{timestamp}.csv"
+        export_csv(existing, csv_path)
+        return existing, elapsed, csv_path
 
     leads = scrape_query(
         query=query,
@@ -154,6 +175,7 @@ def run_query(
         seen_card_keys=resumed_card_keys,
         checkpoint_callback=persist_checkpoint,
         progress_callback=progress_callback,
+        should_cancel=should_cancel,
     )
     fresh_leads: list[LeadRecord] = []
     skipped_persisted = 0
@@ -180,6 +202,14 @@ def run_query(
         end_reason=None,
         message=f"Merged scrape results into {len(all_leads)} unique leads",
     )
+    if cancellation_requested("Cancellation requested after scraping. Skipping the remaining steps.", len(all_leads)):
+        elapsed = time.time() - started
+        output_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = run_at.strftime("%Y-%m-%d_%I-%M-%S%p").lower()
+        query_slug = slugify(query)
+        csv_path = output_dir / f"leads_{query_slug}_{timestamp}.csv"
+        export_csv(all_leads, csv_path)
+        return all_leads, elapsed, csv_path
 
     if cfg.enrich_websites:
         from scraper_enrichment import enrich_from_websites
@@ -191,15 +221,24 @@ def run_query(
             end_reason=None,
             message=f"Enriching {len(all_leads)} leads from websites",
         )
-        enrich_from_websites(all_leads)
-        logger.info("query=%s enrichment_complete leads=%s", query, len(all_leads))
-        emit_progress(
-            phase="enrichment_complete",
-            leads_collected=len(all_leads),
-            leads_target=cfg.max_results_per_query,
-            end_reason=None,
-            message=f"Finished enrichment for {len(all_leads)} leads",
-        )
+        enrich_from_websites(all_leads, should_cancel=should_cancel)
+        if should_cancel and should_cancel():
+            emit_progress(
+                phase="cancel_requested",
+                leads_collected=len(all_leads),
+                leads_target=cfg.max_results_per_query,
+                end_reason="cancel_requested",
+                message="Cancellation requested during enrichment. Exporting collected leads.",
+            )
+        else:
+            logger.info("query=%s enrichment_complete leads=%s", query, len(all_leads))
+            emit_progress(
+                phase="enrichment_complete",
+                leads_collected=len(all_leads),
+                leads_target=cfg.max_results_per_query,
+                end_reason=None,
+                message=f"Finished enrichment for {len(all_leads)} leads",
+            )
 
     for lead in all_leads:
         normalize_lead(lead)

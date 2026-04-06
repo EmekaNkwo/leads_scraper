@@ -168,6 +168,7 @@ def scrape_query(
     seen_card_keys: set[str] | None = None,
     checkpoint_callback: Callable[[list[LeadRecord], set[str], set[str]], None] | None = None,
     progress_callback: Callable[[dict[str, object]], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> list[LeadRecord]:
     if sync_playwright is None:
         raise RuntimeError("Playwright is not installed. Run pip install -r requirements.txt then playwright install.")
@@ -220,10 +221,16 @@ def scrape_query(
         browser = p.chromium.launch(headless=headless)
         page = browser.new_page()
         try:
+            if should_cancel and should_cancel():
+                end_reason = "cancel_requested"
+                return results
             _open_maps_search(page, query)
 
             while len(results) < max_results:
                 loop_count += 1
+                if should_cancel and should_cancel():
+                    end_reason = "cancel_requested"
+                    break
                 if time.time() - started >= effective_timeout:
                     end_reason = "runtime_limit"
                     break
@@ -256,6 +263,9 @@ def scrape_query(
                 )
                 discovered_this_pass = 0
                 while discovered_this_pass < total_visible:
+                    if should_cancel and should_cancel():
+                        end_reason = "cancel_requested"
+                        break
                     if time.time() - started >= effective_timeout:
                         end_reason = "runtime_limit"
                         break
@@ -350,6 +360,9 @@ def scrape_query(
 
                 if len(results) >= max_results:
                     end_reason = "max_results_reached"
+                    break
+                if should_cancel and should_cancel():
+                    end_reason = "cancel_requested"
                     break
                 if time.time() - started >= effective_timeout:
                     end_reason = "runtime_limit"

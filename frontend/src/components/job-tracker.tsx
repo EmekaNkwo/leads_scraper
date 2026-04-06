@@ -45,6 +45,7 @@ const statusConfig = {
     variant: "secondary" as const,
   },
   failed: { icon: XCircle, label: "Failed", variant: "destructive" as const },
+  cancelled: { icon: XCircle, label: "Cancelled", variant: "secondary" as const },
 };
 
 export function JobTracker({
@@ -93,8 +94,13 @@ export function JobTracker({
   const shouldShowDownloadPrompt =
     !isRunning &&
     job.leads.length > 0 &&
-    (job.status === "completed" || job.status === "failed");
+    (job.status === "completed" || job.status === "failed" || job.status === "cancelled");
   const formatExpiry = (iso: string) => new Date(iso).toLocaleString();
+  const hasSummaryStats =
+    (job.summary?.total_leads ?? 0) > 0 ||
+    (job.summary?.queries_failed ?? 0) > 0 ||
+    (job.summary?.queries_cancelled ?? 0) > 0 ||
+    (job.summary?.queries_succeeded ?? 0) > 0;
 
   return (
     <Card>
@@ -254,15 +260,21 @@ export function JobTracker({
                   className="flex items-start justify-between rounded-md border px-3 py-2 text-sm"
                 >
                   <div className="flex items-center gap-2">
-                    {r.error ? (
+                    {r.status === "failed" ? (
                       <Warning className="size-4 text-destructive" weight="fill" />
+                    ) : r.status === "cancelled" ? (
+                      <XCircle className="size-4 text-muted-foreground" weight="fill" />
                     ) : (
                       <CheckCircle className="size-4 text-green-500" weight="fill" />
                     )}
                     <span className="font-medium">{r.query}</span>
                   </div>
-                  {r.error ? (
+                  {r.status === "failed" ? (
                     <span className="text-xs text-destructive">{r.error}</span>
+                  ) : r.status === "cancelled" ? (
+                    <span className="text-xs text-muted-foreground">
+                      Cancelled after {r.elapsed_seconds}s
+                    </span>
                   ) : (
                     <span className="text-xs text-muted-foreground">
                       {r.leads_count} leads in {r.elapsed_seconds}s
@@ -296,14 +308,16 @@ export function JobTracker({
           </>
         )}
 
-        {job.summary?.total_leads > 0 && (
+        {hasSummaryStats && (
           <>
             <Separator />
-            <div className="grid grid-cols-4 gap-3">
+            <div className="grid grid-cols-6 gap-3">
               {[
                 ["Total", job.summary.total_leads],
                 ["Emails", job.summary.emails_found],
                 ["Websites", job.summary.websites_found],
+                ["Completed", job.summary.queries_succeeded],
+                ["Cancelled", job.summary.queries_cancelled],
                 ["Failed", job.summary.queries_failed],
               ].map(([label, val]) => (
                 <div

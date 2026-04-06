@@ -18,6 +18,8 @@ interface JobsHistoryProps {
   jobs: JobStatus[];
   activeJobId: string | null;
   onViewJob: (job: JobStatus) => void;
+  onCancelJob: (job: JobStatus) => void;
+  cancellingJobId: string | null;
 }
 
 const statusIcon = {
@@ -25,6 +27,7 @@ const statusIcon = {
   running: Spinner,
   completed: CheckCircle,
   failed: XCircle,
+  cancelled: XCircle,
 };
 
 const statusVariant = {
@@ -32,9 +35,16 @@ const statusVariant = {
   running: "default" as const,
   completed: "secondary" as const,
   failed: "destructive" as const,
+  cancelled: "secondary" as const,
 };
 
-export function JobsHistory({ jobs, activeJobId, onViewJob }: JobsHistoryProps) {
+export function JobsHistory({
+  jobs,
+  activeJobId,
+  onViewJob,
+  onCancelJob,
+  cancellingJobId,
+}: JobsHistoryProps) {
   const columns = useMemo<Column<JobStatus>[]>(
     () => [
       {
@@ -76,22 +86,41 @@ export function JobsHistory({ jobs, activeJobId, onViewJob }: JobsHistoryProps) 
       {
         key: "actions",
         header: "",
-        headerClassName: "w-[40px]",
+        headerClassName: "w-[84px]",
         render: (row) => (
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            onClick={(e) => {
-              e.stopPropagation();
-              onViewJob(row);
-            }}
-          >
-            <Eye />
-          </Button>
+          <div className="flex items-center justify-end gap-1">
+            {(row.status === "pending" || row.status === "running") && (
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                className="text-destructive hover:text-destructive"
+                disabled={cancellingJobId === row.job_id}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onCancelJob(row);
+                }}
+                aria-label={`Cancel job ${row.job_id}`}
+                title="Cancel job"
+              >
+                <XCircle weight="fill" />
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              onClick={(e) => {
+                e.stopPropagation();
+                onViewJob(row);
+              }}
+              aria-label={`View job ${row.job_id}`}
+            >
+              <Eye />
+            </Button>
+          </div>
         ),
       },
     ],
-    [onViewJob],
+    [cancellingJobId, onCancelJob, onViewJob],
   );
 
   if (jobs.length === 0) {

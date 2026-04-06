@@ -25,6 +25,8 @@ export default function Dashboard() {
     formatElapsed,
     jobs,
     viewJob,
+    cancelJob,
+    cancellingJobId,
   } = useScraper();
 
   const {
@@ -58,6 +60,8 @@ export default function Dashboard() {
               jobs={jobs}
               activeJobId={activeJobId}
               onViewJob={viewJob}
+              onCancelJob={cancelJob}
+              cancellingJobId={cancellingJobId}
             />
           </div>
 

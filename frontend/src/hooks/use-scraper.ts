@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  useCancelScrapeMutation,
   useStartScrapeMutation,
   useGetJobQuery,
   useListJobsQuery,
@@ -34,18 +35,25 @@ export function useScraper() {
   const [form, setForm] = useState<ScrapeRequest>(DEFAULT_FORM);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  const [cancellingJobId, setCancellingJobId] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [startScrape, { isLoading: isSubmitting }] = useStartScrapeMutation();
+  const [cancelScrape] = useCancelScrapeMutation();
 
   const {
     data: activeJob,
     refetch: refetchJob,
   } = useGetJobQuery(activeJobId!, { skip: !activeJobId });
 
-  const { data: jobs = [], refetch: refetchJobs } = useListJobsQuery({
-    limit: 50,
-  });
+  const { data: jobs = [], refetch: refetchJobs } = useListJobsQuery(
+    {
+      limit: 50,
+    },
+    {
+      pollingInterval: 5000,
+    },
+  );
 
   const isRunning =
     !!activeJob && (activeJob.status === "pending" || activeJob.status === "running");
@@ -112,6 +120,20 @@ export function useScraper() {
     setActiveJobId(job.job_id);
   }, []);
 
+  const cancelJob = useCallback(
+    async (job: JobStatus) => {
+      if (job.status !== "pending" && job.status !== "running") return;
+      try {
+        setCancellingJobId(job.job_id);
+        const updated = await cancelScrape(job.job_id).unwrap();
+        setActiveJobId(updated.job_id);
+      } finally {
+        setCancellingJobId(null);
+      }
+    },
+    [cancelScrape],
+  );
+
   const formatElapsed = useCallback((s: number) => {
     const m = Math.floor(s / 60);
     const sec = s % 60;
@@ -132,5 +154,7 @@ export function useScraper() {
     formatElapsed,
     jobs,
     viewJob,
+    cancelJob,
+    cancellingJobId,
   };
 }
