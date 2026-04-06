@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 import sqlite3
 import time
 import uuid
@@ -29,6 +30,8 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+api_logger = logging.getLogger("uvicorn.error")
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -271,6 +274,17 @@ def _run_job(job_id: str, req: ScrapeRequest) -> None:
                 )
                 return
             job.status = "running"
+        api_logger.info(
+            "job=%s started queries=%s max_results=%s max_scrolls=%s max_runtime_seconds=%s headless=%s enrich_websites=%s resume=%s",
+            job_id,
+            req.queries,
+            req.max_results_per_query,
+            req.max_scrolls_per_query,
+            req.max_runtime_seconds,
+            req.headless,
+            req.enrich_websites,
+            req.resume,
+        )
 
         cfg = _load_runtime_config()
         cfg.queries = req.queries
@@ -304,6 +318,7 @@ def _run_job(job_id: str, req: ScrapeRequest) -> None:
                 )
                 break
             try:
+                api_logger.info("job=%s query=%r started", job_id, query)
                 leads, elapsed, csv_path = run_query(
                     query=query,
                     cfg=cfg,
@@ -331,7 +346,27 @@ def _run_job(job_id: str, req: ScrapeRequest) -> None:
                             ),
                         )
                     )
+                api_logger.info(
+                    "job=%s query=%r completed status=%s leads=%s elapsed_seconds=%.1f csv_path=%s",
+                    job_id,
+                    query,
+                    "cancelled" if _is_cancel_requested(job_id) else "completed",
+                    len(leads),
+                    elapsed,
+                    csv_path,
+                )
+                if not leads:
+                    latest_progress = job.progress
+                    api_logger.warning(
+                        "job=%s query=%r produced_zero_leads phase=%s end_reason=%s recent_events=%s",
+                        job_id,
+                        query,
+                        latest_progress.phase if latest_progress else None,
+                        latest_progress.end_reason if latest_progress else None,
+                        job.recent_events[-3:],
+                    )
             except Exception as exc:
+                api_logger.exception("job=%s query=%r failed: %s", job_id, query, exc)
                 with _jobs_lock:
                     job = _jobs[job_id]
                     job.results.append(
@@ -371,6 +406,15 @@ def _run_job(job_id: str, req: ScrapeRequest) -> None:
                 job.status = "failed" if job.results and all(r.error for r in job.results) else "completed"
                 final_message = f"Job {job.status} with {job.summary['total_leads']} total leads"
                 end_reason = None
+        api_logger.info(
+            "job=%s finished status=%s total_leads=%s queries_done=%s/%s summary=%s",
+            job_id,
+            job.status,
+            job.summary["total_leads"],
+            job.queries_done,
+            job.queries_total,
+            job.summary,
+        )
         update_progress(
             {
                 "phase": job.status,
@@ -398,6 +442,7 @@ def _run_job(job_id: str, req: ScrapeRequest) -> None:
                         "end_reason": "cancel_requested" if job.status == "cancelled" else "unexpected_error",
                     },
                 )
+        api_logger.exception("job=%s failed unexpectedly: %s", job_id, exc)
     finally:
         with _jobs_lock:
             _job_cancel_events.pop(job_id, None)
@@ -471,6 +516,7 @@ def start_scrape(req: ScrapeRequest):
     with _jobs_lock:
         _jobs[job_id] = job
         _job_cancel_events[job_id] = Event()
+    api_logger.info("job=%s submitted queries=%s", job_id, req.queries)
     Thread(target=_run_job, args=(job_id, req), daemon=True).start()
     return job
 

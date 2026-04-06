@@ -36,6 +36,7 @@ export function useScraper() {
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [cancellingJobId, setCancellingJobId] = useState<string | null>(null);
+  const [jobsPollingInterval, setJobsPollingInterval] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [startScrape, { isLoading: isSubmitting }] = useStartScrapeMutation();
@@ -51,12 +52,19 @@ export function useScraper() {
       limit: 50,
     },
     {
-      pollingInterval: 5000,
+      pollingInterval: jobsPollingInterval,
     },
   );
 
   const isRunning =
     !!activeJob && (activeJob.status === "pending" || activeJob.status === "running");
+  const hasActiveJobs = jobs.some(
+    (job) => job.status === "pending" || job.status === "running",
+  );
+
+  useEffect(() => {
+    setJobsPollingInterval(hasActiveJobs ? 5000 : 0);
+  }, [hasActiveJobs]);
 
   // Poll active job while running
   useEffect(() => {
