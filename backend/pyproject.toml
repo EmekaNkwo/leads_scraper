@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "leads-scraper-backend"
+version = "0.1.0"
+description = "FastAPI backend for Google Maps lead scraping and CSV exports."
+requires-python = ">=3.10"
+dependencies = [
+    "requests",
+    "beautifulsoup4",
+    "playwright",
+    "pytest",
+    "pandas",
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[tool.setuptools]
+py-modules = [
+    "api",
+    "scraper",
+    "scraper_config",
+    "scraper_dedupe_store",
+    "scraper_enrichment",
+    "scraper_exporters",
+    "scraper_maps",
+    "scraper_models",
+    "scraper_utils",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.vercel.scripts]
+build = "python -m playwright install chromium"

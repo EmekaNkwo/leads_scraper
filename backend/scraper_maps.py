@@ -5,10 +5,11 @@ import re
 import time
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import quote_plus
 
 from scraper_models import LeadRecord
-from scraper_utils import NA_VALUE, canonicalize_url, lead_identity_aliases, lead_identity_key, normalize_lead
+from scraper_utils import NA_VALUE, canonicalize_url, lead_identity_aliases, lead_identity_key, normalize_lead, slugify
 
 try:
     from playwright.sync_api import Page, TimeoutError, sync_playwright
@@ -24,6 +25,8 @@ STALE_SCROLL_WAIT_MS = 2000
 MAX_STALE_SCROLLS = 7
 CHECKPOINT_LEAD_INTERVAL = 10
 CHECKPOINT_TIME_INTERVAL_SECONDS = 20
+DEBUG_CARD_SAMPLE_LIMIT = 3
+DEBUG_TEXT_LIMIT = 240
 
 
 def _safe_text(locator: object, timeout_ms: int = 1000) -> str:
@@ -32,6 +35,118 @@ def _safe_text(locator: object, timeout_ms: int = 1000) -> str:
         return value.strip()
     except Exception:
         return ""
+
+
+def _truncate(value: str, limit: int = DEBUG_TEXT_LIMIT) -> str:
+    compact = " ".join((value or "").split())
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[:limit]}..."
+
+
+def _artifact_dir_from_logger(logger: logging.Logger | None) -> Path | None:
+    if logger is None:
+        return None
+    for handler in logger.handlers:
+        base_filename = getattr(handler, "baseFilename", None)
+        if base_filename:
+            return Path(base_filename).resolve().parent
+    return None
+
+
+def _safe_page_title(page: Page) -> str:
+    try:
+        return page.title()
+    except Exception:
+        return "(title unavailable)"
+
+
+def _capture_card_sample(card: object, reason: str, error: Exception | None = None) -> dict[str, object]:
+    sample = {
+        "reason": reason,
+        "name_hint": _get_card_name(card) or None,
+        "card_key_hint": _get_card_key(card) or None,
+        "anchor_count": card.locator("a.hfpxzc").count(),
+        "href_hint": None,
+        "text_excerpt": _truncate(_get_card_fallback_text(card)),
+    }
+    try:
+        sample["href_hint"] = card.locator("a.hfpxzc").first.get_attribute("href", timeout=1000)
+    except Exception:
+        sample["href_hint"] = None
+    if error is not None:
+        sample["error"] = str(error)
+    return sample
+
+
+def _dump_zero_collection_diagnostics(
+    page: Page,
+    query: str,
+    logger: logging.Logger | None,
+    *,
+    end_reason: str,
+    max_visible_cards: int,
+    scrolls_used: int,
+    skip_counts: dict[str, int],
+    card_samples: list[dict[str, object]],
+) -> None:
+    artifact_dir = _artifact_dir_from_logger(logger)
+    if artifact_dir is None:
+        return
+
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    prefix = artifact_dir / f"scrape_debug_{slugify(query)}_{timestamp}"
+
+    html_path = prefix.with_suffix(".html")
+    screenshot_path = prefix.with_suffix(".png")
+    summary_path = prefix.with_suffix(".txt")
+
+    try:
+        html_path.write_text(page.content(), encoding="utf-8")
+    except Exception as exc:
+        if logger:
+            logger.warning("query=%s debug_artifact_write_failed target=%s error=%s", query, html_path.name, exc)
+
+    try:
+        page.screenshot(path=str(screenshot_path), full_page=True, timeout=10_000)
+    except Exception as exc:
+        if logger:
+            logger.warning("query=%s debug_artifact_write_failed target=%s error=%s", query, screenshot_path.name, exc)
+
+    page_title = _safe_page_title(page)
+    summary_lines = [
+        f"query={query}",
+        f"url={page.url}",
+        f"title={page_title}",
+        f"end_reason={end_reason}",
+        f"max_visible_cards={max_visible_cards}",
+        f"scrolls_used={scrolls_used}",
+        f"skip_counts={skip_counts}",
+        "card_samples=",
+    ]
+    summary_lines.extend(f"- {sample}" for sample in card_samples)
+    try:
+        summary_path.write_text("\n".join(summary_lines), encoding="utf-8")
+    except Exception as exc:
+        if logger:
+            logger.warning("query=%s debug_artifact_write_failed target=%s error=%s", query, summary_path.name, exc)
+
+    if logger:
+        logger.warning(
+            "query=%s zero_collection_debug end_reason=%s max_visible_cards=%s scrolls_used=%s skip_counts=%s samples=%s html=%s screenshot=%s summary=%s title=%s url=%s",
+            query,
+            end_reason,
+            max_visible_cards,
+            scrolls_used,
+            skip_counts,
+            card_samples,
+            html_path.name,
+            screenshot_path.name,
+            summary_path.name,
+            _truncate(page_title, 120),
+            page.url,
+        )
 
 
 def _extract_phone(text: str) -> str:
@@ -189,6 +304,14 @@ def scrape_query(
     last_checkpoint_at = started
     last_checkpoint_count = 0
     end_reason = "completed"
+    max_visible_cards = 0
+    skip_counts = {
+        "missing_key": 0,
+        "missing_name": 0,
+        "click_failed": 0,
+        "duplicate": 0,
+    }
+    card_samples: list[dict[str, object]] = []
 
     def emit_progress(**payload: object) -> None:
         if progress_callback:
@@ -237,6 +360,7 @@ def scrape_query(
 
                 cards = page.locator("div.Nv2PK, div[role='article']")
                 total_visible = cards.count()
+                max_visible_cards = max(max_visible_cards, total_visible)
                 if logger:
                     logger.info(
                         "query=%s pass=%s collected=%s/%s visible_cards=%s scrolls_used=%s/%s stale_scrolls=%s seen_cards=%s",
@@ -276,13 +400,23 @@ def scrape_query(
                     card = cards.nth(discovered_this_pass)
                     discovered_this_pass += 1
                     card_key = _get_card_key(card)
-                    if not card_key or card_key in seen_card_keys:
+                    if not card_key:
+                        skip_counts["missing_key"] += 1
+                        if len(card_samples) < DEBUG_CARD_SAMPLE_LIMIT:
+                            card_samples.append(_capture_card_sample(card, "missing_key"))
                         if logger and logger.isEnabledFor(logging.DEBUG):
-                            logger.debug("query=%s skip_card card_key=%s reason=%s", query, card_key or "missing", "seen_or_missing")
+                            logger.debug("query=%s skip_card reason=missing_key", query)
+                        continue
+                    if card_key in seen_card_keys:
+                        if logger and logger.isEnabledFor(logging.DEBUG):
+                            logger.debug("query=%s skip_card card_key=%s reason=seen_or_missing", query, card_key)
                         continue
 
                     name = _get_card_name(card)
                     if not name:
+                        skip_counts["missing_name"] += 1
+                        if len(card_samples) < DEBUG_CARD_SAMPLE_LIMIT:
+                            card_samples.append(_capture_card_sample(card, "missing_name"))
                         if logger and logger.isEnabledFor(logging.DEBUG):
                             logger.debug("query=%s skip_card card_key=%s reason=missing_name", query, card_key)
                         continue
@@ -290,9 +424,12 @@ def scrape_query(
                     try:
                         card.locator("a.hfpxzc").first.click(timeout=1500)
                         page.wait_for_timeout(600)
-                    except Exception:
+                    except Exception as exc:
+                        skip_counts["click_failed"] += 1
+                        if len(card_samples) < DEBUG_CARD_SAMPLE_LIMIT:
+                            card_samples.append(_capture_card_sample(card, "click_failed", exc))
                         if logger and logger.isEnabledFor(logging.DEBUG):
-                            logger.debug("query=%s skip_card card_key=%s reason=click_failed", query, card_key)
+                            logger.debug("query=%s skip_card card_key=%s reason=click_failed error=%s", query, card_key, exc)
                         continue
 
                     seen_card_keys.add(card_key)
@@ -315,6 +452,9 @@ def scrape_query(
                     lead_key = lead_identity_key(lead)
                     lead_aliases = lead_identity_aliases(lead)
                     if seen_lead_keys.intersection(lead_aliases):
+                        skip_counts["duplicate"] += 1
+                        if len(card_samples) < DEBUG_CARD_SAMPLE_LIMIT:
+                            card_samples.append(_capture_card_sample(card, "duplicate"))
                         if logger and logger.isEnabledFor(logging.DEBUG):
                             logger.debug("query=%s skip_lead lead_key=%s reason=duplicate", query, lead_key)
                         continue
@@ -381,6 +521,18 @@ def scrape_query(
                 if stale_scrolls >= MAX_STALE_SCROLLS:
                     end_reason = "stale_scroll_limit"
                     break
+
+            if not results and max_visible_cards > 0:
+                _dump_zero_collection_diagnostics(
+                    page,
+                    query,
+                    logger,
+                    end_reason=end_reason,
+                    max_visible_cards=max_visible_cards,
+                    scrolls_used=scrolls_used,
+                    skip_counts=skip_counts,
+                    card_samples=card_samples,
+                )
         finally:
             if checkpoint_callback and results:
                 checkpoint_callback(results, seen_lead_keys, seen_card_keys)
