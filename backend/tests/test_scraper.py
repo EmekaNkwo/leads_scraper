@@ -57,6 +57,9 @@ def test_run_query_resume_dedupes_checkpoint_and_new_results(tmp_path: Path, mon
   "version": 2,
   "lead_keys": ["maps:https://maps.google.com?cid=123"],
   "card_keys": ["href:https://maps.google.com?cid=123"],
+  "meta": {
+    "scrolls_used": 4
+  },
   "leads": [
     {
       "query": "electronics store lagos",
@@ -71,7 +74,10 @@ def test_run_query_resume_dedupes_checkpoint_and_new_results(tmp_path: Path, mon
         encoding="utf-8",
     )
 
-    def fake_scrape_query(**_kwargs):
+    captured_kwargs = {}
+
+    def fake_scrape_query(**kwargs):
+        captured_kwargs.update(kwargs)
         return [
             LeadRecord(
                 query="electronics store lagos",
@@ -111,6 +117,7 @@ def test_run_query_resume_dedupes_checkpoint_and_new_results(tmp_path: Path, mon
     )
 
     assert len(leads) == 2
+    assert captured_kwargs["initial_scrolls_used"] == 4
 
 
 def test_run_query_skips_master_csv_when_disabled(tmp_path: Path, monkeypatch):

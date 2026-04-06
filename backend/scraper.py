@@ -75,22 +75,25 @@ def run_query(
     existing: list[LeadRecord] = []
     resumed_card_keys: set[str] = set()
     resumed_lead_keys: set[str] = set()
+    resumed_scrolls_used = 0
     persisted_seen_aliases = load_seen_aliases(dedupe_db)
     if resume:
         checkpoint_state = load_checkpoint(checkpoint_file, query)
         existing = dedupe_leads(checkpoint_state.leads)
         resumed_card_keys = set(checkpoint_state.card_keys)
         resumed_lead_keys = set(checkpoint_state.lead_keys)
+        resumed_scrolls_used = checkpoint_state.scrolls_used
         if not resumed_lead_keys:
             for lead in existing:
                 resumed_lead_keys.update(lead_identity_aliases(lead))
         if existing:
             logger.info(
-                "Loaded checkpoint for query='%s' leads=%s lead_keys=%s card_keys=%s",
+                "Loaded checkpoint for query='%s' leads=%s lead_keys=%s card_keys=%s scrolls_used=%s",
                 query,
                 len(existing),
                 len(resumed_lead_keys),
                 len(resumed_card_keys),
+                resumed_scrolls_used,
             )
     resumed_lead_keys.update(persisted_seen_aliases)
     if persisted_seen_aliases:
@@ -103,6 +106,7 @@ def run_query(
     latest_checkpoint_state = {
         "lead_keys": set(resumed_lead_keys),
         "card_keys": set(resumed_card_keys),
+        "scrolls_used": resumed_scrolls_used,
     }
 
     def emit_progress(**payload: object) -> None:
@@ -121,21 +125,30 @@ def run_query(
             return True
         return False
 
-    def persist_checkpoint(partial_leads: list[LeadRecord], lead_keys: set[str], card_keys: set[str]) -> None:
+    def persist_checkpoint(
+        partial_leads: list[LeadRecord],
+        lead_keys: set[str],
+        card_keys: set[str],
+        scrolls_used: int,
+    ) -> None:
         combined = dedupe_leads(existing + partial_leads)
         latest_checkpoint_state["lead_keys"] = set(lead_keys)
         latest_checkpoint_state["card_keys"] = set(card_keys)
+        latest_checkpoint_state["scrolls_used"] = max(0, int(scrolls_used))
         save_checkpoint(
             checkpoint_file,
             combined,
             latest_checkpoint_state["lead_keys"],
             latest_checkpoint_state["card_keys"],
+            latest_checkpoint_state["scrolls_used"],
         )
         emit_progress(
             phase="checkpoint_saved",
             leads_collected=len(combined),
             leads_target=cfg.max_results_per_query,
             end_reason=None,
+            scrolls_used=latest_checkpoint_state["scrolls_used"],
+            max_scrolls=cfg.max_scrolls_per_query,
             message=f"Checkpoint updated with {len(combined)} total leads",
         )
 
@@ -145,7 +158,9 @@ def run_query(
             leads_collected=len(existing),
             leads_target=cfg.max_results_per_query,
             end_reason=None,
-            message=f"Loaded {len(existing)} leads from checkpoint",
+            scrolls_used=resumed_scrolls_used,
+            max_scrolls=cfg.max_scrolls_per_query,
+            message=f"Loaded {len(existing)} leads and {resumed_scrolls_used} prior scrolls from checkpoint",
         )
     if persisted_seen_aliases:
         emit_progress(
@@ -173,6 +188,7 @@ def run_query(
         logger=logger,
         seen_lead_keys=resumed_lead_keys,
         seen_card_keys=resumed_card_keys,
+        initial_scrolls_used=resumed_scrolls_used,
         checkpoint_callback=persist_checkpoint,
         progress_callback=progress_callback,
         should_cancel=should_cancel,
@@ -262,6 +278,7 @@ def run_query(
         all_leads,
         final_lead_keys,
         latest_checkpoint_state["card_keys"],
+        latest_checkpoint_state["scrolls_used"],
     )
     elapsed = time.time() - started
     emit_progress(

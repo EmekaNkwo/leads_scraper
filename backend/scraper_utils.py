@@ -19,6 +19,14 @@ class CheckpointState:
     leads: list[LeadRecord] = field(default_factory=list)
     lead_keys: set[str] = field(default_factory=set)
     card_keys: set[str] = field(default_factory=set)
+    scrolls_used: int = 0
+
+
+def _coerce_non_negative_int(value: object, default: int = 0) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
 
 
 def slugify(text: str) -> str:
@@ -226,7 +234,13 @@ def checkpoint_path(checkpoint_dir: Path, query: str) -> Path:
     return checkpoint_dir / f"{slugify(query)}.json"
 
 
-def save_checkpoint(path: Path, leads: list[LeadRecord], lead_keys: set[str], card_keys: set[str]) -> None:
+def save_checkpoint(
+    path: Path,
+    leads: list[LeadRecord],
+    lead_keys: set[str],
+    card_keys: set[str],
+    scrolls_used: int = 0,
+) -> None:
     payload = {
         "version": 2,
         "saved_at": datetime.now().isoformat(),
@@ -236,6 +250,7 @@ def save_checkpoint(path: Path, leads: list[LeadRecord], lead_keys: set[str], ca
         "meta": {
             "lead_count": len(leads),
             "card_key_count": len(card_keys),
+            "scrolls_used": _coerce_non_negative_int(scrolls_used),
         },
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -256,9 +271,16 @@ def load_checkpoint(path: Path, query: str) -> CheckpointState:
     if payload.get("version") == 2:
         lead_keys = {key for key in payload.get("lead_keys", []) if isinstance(key, str)}
         card_keys = {key for key in payload.get("card_keys", []) if isinstance(key, str)}
+        meta = payload.get("meta", {})
+        scrolls_used = _coerce_non_negative_int(meta.get("scrolls_used", 0)) if isinstance(meta, dict) else 0
         for lead in leads:
             lead_keys.update(lead_identity_aliases(lead))
-        return CheckpointState(leads=leads, lead_keys=lead_keys, card_keys=card_keys)
+        return CheckpointState(
+            leads=leads,
+            lead_keys=lead_keys,
+            card_keys=card_keys,
+            scrolls_used=scrolls_used,
+        )
 
     return CheckpointState(
         leads=leads,

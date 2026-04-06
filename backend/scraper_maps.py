@@ -281,7 +281,8 @@ def scrape_query(
     logger: logging.Logger | None = None,
     seen_lead_keys: set[str] | None = None,
     seen_card_keys: set[str] | None = None,
-    checkpoint_callback: Callable[[list[LeadRecord], set[str], set[str]], None] | None = None,
+    initial_scrolls_used: int = 0,
+    checkpoint_callback: Callable[[list[LeadRecord], set[str], set[str], int], None] | None = None,
     progress_callback: Callable[[dict[str, object]], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> list[LeadRecord]:
@@ -299,7 +300,7 @@ def scrape_query(
     seen_lead_keys = set(seen_lead_keys or set())
     seen_card_keys = set(seen_card_keys or set())
     stale_scrolls = 0
-    scrolls_used = 0
+    scrolls_used = max(0, int(initial_scrolls_used))
     loop_count = 0
     last_checkpoint_at = started
     last_checkpoint_count = 0
@@ -319,7 +320,7 @@ def scrape_query(
 
     if logger:
         logger.info(
-            "query=%s scrape_started target_results=%s max_scrolls=%s timeout_seconds=%s headless=%s resumed_leads=%s resumed_cards=%s",
+            "query=%s scrape_started target_results=%s max_scrolls=%s timeout_seconds=%s headless=%s resumed_leads=%s resumed_cards=%s initial_scrolls_used=%s",
             query,
             max_results,
             max_scrolls,
@@ -327,6 +328,7 @@ def scrape_query(
             headless,
             len(seen_lead_keys),
             len(seen_card_keys),
+            scrolls_used,
         )
     emit_progress(
         query=query,
@@ -334,7 +336,7 @@ def scrape_query(
         leads_collected=0,
         leads_target=max_results,
         visible_cards=0,
-        scrolls_used=0,
+        scrolls_used=scrolls_used,
         max_scrolls=max_scrolls,
         stale_scrolls=0,
         message=f"Started scraping '{query}'",
@@ -487,7 +489,7 @@ def scrape_query(
                         len(results) - last_checkpoint_count >= CHECKPOINT_LEAD_INTERVAL
                         or time.time() - last_checkpoint_at >= CHECKPOINT_TIME_INTERVAL_SECONDS
                     ):
-                        checkpoint_callback(results, seen_lead_keys, seen_card_keys)
+                        checkpoint_callback(results, seen_lead_keys, seen_card_keys, scrolls_used)
                         last_checkpoint_at = time.time()
                         last_checkpoint_count = len(results)
                         if logger:
@@ -534,8 +536,8 @@ def scrape_query(
                     card_samples=card_samples,
                 )
         finally:
-            if checkpoint_callback and results:
-                checkpoint_callback(results, seen_lead_keys, seen_card_keys)
+            if checkpoint_callback and (results or seen_card_keys or seen_lead_keys or scrolls_used > 0):
+                checkpoint_callback(results, seen_lead_keys, seen_card_keys, scrolls_used)
             browser.close()
     if logger:
         logger.info(

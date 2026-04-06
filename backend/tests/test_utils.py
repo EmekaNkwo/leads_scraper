@@ -58,7 +58,7 @@ def test_lead_identity_falls_back_to_maps_url_for_sparse_records():
 def test_checkpoint_round_trip_and_legacy_compatibility(tmp_path):
     path = tmp_path / "checkpoint.json"
     leads = [LeadRecord(query="electronics store lagos", name="Shop", phone="0800 000 0000")]
-    save_checkpoint(path, leads, {"lead:1"}, {"card:1"})
+    save_checkpoint(path, leads, {"lead:1"}, {"card:1"}, scrolls_used=4)
 
     state = load_checkpoint(path, "electronics store lagos")
     assert isinstance(state, CheckpointState)
@@ -66,6 +66,7 @@ def test_checkpoint_round_trip_and_legacy_compatibility(tmp_path):
     assert "lead:1" in state.lead_keys
     assert "lead-phone:shop|08000000000" in state.lead_keys
     assert state.card_keys == {"card:1"}
+    assert state.scrolls_used == 4
 
     legacy_path = tmp_path / "legacy.json"
     legacy_path.write_text(
@@ -76,6 +77,7 @@ def test_checkpoint_round_trip_and_legacy_compatibility(tmp_path):
     assert len(legacy_state.leads) == 1
     assert legacy_state.card_keys == set()
     assert len(legacy_state.lead_keys) == 1
+    assert legacy_state.scrolls_used == 0
 
 
 def test_cleanup_expired_files_removes_old_files_and_keeps_recent(tmp_path):
@@ -131,3 +133,23 @@ def test_cleanup_expired_files_skips_locked_files(tmp_path, monkeypatch):
 
     assert deleted == 0
     assert locked_log.exists()
+
+
+def test_load_checkpoint_invalid_scrolls_defaults_to_zero(tmp_path):
+    checkpoint = tmp_path / "checkpoint.json"
+    checkpoint.write_text(
+        """
+{
+  "version": 2,
+  "meta": {
+    "scrolls_used": "not-a-number"
+  },
+  "leads": []
+}
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    state = load_checkpoint(checkpoint, "electronics store lagos")
+
+    assert state.scrolls_used == 0
