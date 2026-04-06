@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from scraper_models import LeadRecord
 from scraper_utils import (
@@ -105,3 +106,28 @@ def test_cleanup_expired_files_removes_old_files_and_keeps_recent(tmp_path):
     assert csv_file.exists()
     assert not old_log.exists()
     assert not old_checkpoint.exists()
+
+
+def test_cleanup_expired_files_skips_locked_files(tmp_path, monkeypatch):
+    locked_log = tmp_path / "run_locked.log"
+    locked_log.write_text("locked log", encoding="utf-8")
+
+    stale_time = (datetime.now() - timedelta(minutes=120)).timestamp()
+
+    import os
+
+    os.utime(locked_log, (stale_time, stale_time))
+
+    original_unlink = Path.unlink
+
+    def locked_unlink(self, missing_ok=False):
+        if self == locked_log:
+            raise PermissionError("file is locked")
+        return original_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", locked_unlink)
+
+    deleted = cleanup_expired_files([tmp_path], retention_minutes=60, patterns=["*.log"])
+
+    assert deleted == 0
+    assert locked_log.exists()

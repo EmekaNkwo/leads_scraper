@@ -210,7 +210,13 @@ def cleanup_expired_files(
                 modified = datetime.fromtimestamp(file_path.stat().st_mtime)
                 if modified >= cutoff:
                     continue
-                file_path.unlink(missing_ok=True)
+                try:
+                    file_path.unlink(missing_ok=True)
+                except PermissionError:
+                    # Windows can keep recently used log files locked; skip them.
+                    continue
+                except OSError:
+                    continue
                 deleted += 1
     return deleted
 
