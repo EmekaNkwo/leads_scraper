@@ -9,6 +9,12 @@ import api
 from scraper_models import LeadRecord
 
 
+def _clear_job_state() -> None:
+    with api._jobs_lock:
+        api._jobs.clear()
+        api._job_cancel_events.clear()
+
+
 def test_get_config_no_json_flag(monkeypatch):
     class FakeConfig:
         queries = ["electronics store lagos"]
@@ -154,8 +160,11 @@ def test_download_job_csv_uses_query_and_timestamp_filename():
     assert response.status_code == 200
     assert (
         response.headers["content-disposition"]
-        == "attachment; filename=leads_electronics-store-lagos_2026-04-04_03-30-48am.csv"
+        == 'attachment; filename="leads_electronics-store-lagos_2026-04-04_03-30-48am.csv"'
     )
+    with api._jobs_lock:
+        persisted = api._jobs[job.job_id]
+        assert persisted.combined_csv_filename == "leads_electronics-store-lagos_2026-04-04_03-30-48am.csv"
     with api._jobs_lock:
         api._jobs.pop(job.job_id, None)
 
@@ -202,9 +211,185 @@ def test_download_job_csv_allows_cancelled_jobs_with_leads():
     response = client.get(f"/scrape/{job.job_id}/csv")
 
     assert response.status_code == 200
-    assert response.headers["content-disposition"].startswith("attachment; filename=leads_electronics-store-lagos_")
+    assert response.headers["content-disposition"].startswith('attachment; filename="leads_electronics-store-lagos_')
     with api._jobs_lock:
         api._jobs.pop(job.job_id, None)
+
+
+def test_get_job_reads_from_persisted_store(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = api.ScrapeJobStore(tmp_path / "scrape_jobs")
+    store.save(
+        api.JobStatus(
+            job_id="job-persisted",
+            status="completed",
+            created_at="2026-04-04T03:27:42",
+            completed_at="2026-04-04T03:30:48",
+            queries=["electronics store lagos"],
+            queries_total=1,
+            queries_done=1,
+        )
+    )
+
+    client = TestClient(api.app)
+    response = client.get("/scrape/job-persisted")
+
+    assert response.status_code == 200
+    assert response.json()["job_id"] == "job-persisted"
+    _clear_job_state()
+
+
+def test_download_job_csv_reads_persisted_job_after_restart(tmp_path: Path, monkeypatch):
+    export_dir = tmp_path / "csv_exports"
+
+    class FakeConfig:
+        queries = ["electronics store lagos"]
+        max_results_per_query = 50
+        max_scrolls_per_query = 15
+        max_runtime_seconds = 0
+        output_dir = str(export_dir)
+        logs_dir = "logs"
+        checkpoint_dir = "checkpoints"
+        export_retention_minutes = 60
+        headless = True
+        enrich_websites = True
+        enable_master_csv = False
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(api, "_load_runtime_config", lambda: FakeConfig())
+    store = api.ScrapeJobStore(tmp_path / "scrape_jobs")
+    store.save(
+        api.JobStatus(
+            job_id="job-restart",
+            status="completed",
+            created_at="2026-04-04T03:27:42",
+            completed_at="2026-04-04T03:30:48",
+            queries=["electronics store lagos"],
+            queries_total=1,
+            queries_done=1,
+            results=[
+                api.QueryResult(
+                    query="electronics store lagos",
+                    status="completed",
+                    leads_count=1,
+                    elapsed_seconds=10.0,
+                    csv_path="csv_exports/leads_electronics-store-lagos.csv",
+                )
+            ],
+            leads=[
+                api.LeadOut(
+                    query="electronics store lagos",
+                    name="Shop",
+                    phone="08000000000",
+                    address="Somewhere",
+                    email="N/A",
+                    owner_name="N/A",
+                    website="N/A",
+                    maps_url="N/A",
+                    category="N/A",
+                    social_links=[],
+                    scraped_at="2026-04-04 03:30:48",
+                    confidence_score=0.45,
+                )
+            ],
+            summary={"total_leads": 1},
+        )
+    )
+
+    client = TestClient(api.app)
+    response = client.get("/scrape/job-restart/csv")
+
+    assert response.status_code == 200
+    assert (export_dir / "leads_electronics-store-lagos_2026-04-04_03-30-48am.csv").exists()
+    _clear_job_state()
+
+
+def test_get_job_marks_persisted_running_job_failed_after_restart(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = api.ScrapeJobStore(tmp_path / "scrape_jobs")
+    store.save(
+        api.JobStatus(
+            job_id="job-running-persisted",
+            status="running",
+            created_at="2026-04-04T03:27:42",
+            queries=["electronics store lagos"],
+            queries_total=1,
+            progress=api.JobProgress(
+                query="electronics store lagos",
+                phase="scraping",
+                message="Still scraping",
+            ),
+        )
+    )
+
+    client = TestClient(api.app)
+    response = client.get("/scrape/job-running-persisted")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "failed"
+    assert data["progress"]["end_reason"] == "unexpected_restart"
+    _clear_job_state()
+
+
+def test_download_job_csv_rejects_tampered_combined_filename(tmp_path: Path, monkeypatch):
+    export_dir = tmp_path / "csv_exports"
+    export_dir.mkdir()
+
+    class FakeConfig:
+        queries = ["electronics store lagos"]
+        max_results_per_query = 50
+        max_scrolls_per_query = 15
+        max_runtime_seconds = 0
+        output_dir = str(export_dir)
+        logs_dir = "logs"
+        checkpoint_dir = "checkpoints"
+        export_retention_minutes = 60
+        headless = True
+        enrich_websites = True
+        enable_master_csv = False
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(api, "_load_runtime_config", lambda: FakeConfig())
+    store = api.ScrapeJobStore(tmp_path / "scrape_jobs")
+    store.save(
+        api.JobStatus(
+            job_id="job-tampered-csv",
+            status="completed",
+            created_at="2026-04-04T03:27:42",
+            completed_at="2026-04-04T03:30:48",
+            queries=["electronics store lagos"],
+            queries_total=1,
+            queries_done=1,
+            combined_csv_filename="../secret.csv",
+            combined_csv_path=str(tmp_path / "secret.csv"),
+            leads=[
+                api.LeadOut(
+                    query="electronics store lagos",
+                    name="Shop",
+                    phone="08000000000",
+                    address="Somewhere",
+                    email="N/A",
+                    owner_name="N/A",
+                    website="N/A",
+                    maps_url="N/A",
+                    category="N/A",
+                    social_links=[],
+                    scraped_at="2026-04-04 03:30:48",
+                    confidence_score=0.45,
+                )
+            ],
+            summary={"total_leads": 1},
+        )
+    )
+
+    client = TestClient(api.app)
+    response = client.get("/scrape/job-tampered-csv/csv")
+
+    assert response.status_code == 200
+    assert "../" not in response.headers["content-disposition"]
+    assert "secret.csv" not in response.headers["content-disposition"]
+    _clear_job_state()
 
 
 def test_build_job_summary_counts_cancelled_queries():

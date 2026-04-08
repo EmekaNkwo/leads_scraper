@@ -2,7 +2,9 @@ requests
 beautifulsoup4
 playwright
 pytest
+httpx
 pandas
 fastapi
 uvicorn[standard]
 pydantic
+langgraph

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { CaretLeft, CaretRight } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import {
@@ -42,17 +42,17 @@ export function DataTable<T>({
   emptyMessage = "No data to display.",
 }: DataTableProps<T>) {
   const [page, setPage] = useState(0);
-
-  const totalPages = Math.max(1, Math.ceil(data.length / pageSize));
   const safePageSize = Math.max(1, pageSize);
+  const totalPages = Math.max(1, Math.ceil(data.length / safePageSize));
+  const currentPage = Math.min(page, totalPages - 1);
 
   const pageData = useMemo(
-    () => data.slice(page * safePageSize, (page + 1) * safePageSize),
-    [data, page, safePageSize],
+    () => data.slice(currentPage * safePageSize, (currentPage + 1) * safePageSize),
+    [currentPage, data, safePageSize],
   );
 
-  const start = page * safePageSize + 1;
-  const end = Math.min((page + 1) * safePageSize, data.length);
+  const start = currentPage * safePageSize + 1;
+  const end = Math.min((currentPage + 1) * safePageSize, data.length);
 
   if (data.length === 0) {
     return (
@@ -80,7 +80,8 @@ export function DataTable<T>({
           </TableHeader>
           <TableBody>
             {pageData.map((row, i) => {
-              const key = rowKey(row, page * safePageSize + i);
+              const globalIndex = currentPage * safePageSize + i;
+              const key = rowKey(row, globalIndex);
               return (
                 <TableRow
                   key={key}
@@ -90,7 +91,7 @@ export function DataTable<T>({
                 >
                   {columns.map((col) => (
                     <TableCell key={col.key} className={col.className}>
-                      {col.render(row, page * safePageSize + i)}
+                      {col.render(row, globalIndex)}
                     </TableCell>
                   ))}
                 </TableRow>
@@ -109,19 +110,19 @@ export function DataTable<T>({
             <Button
               variant="outline"
               size="icon-xs"
-              disabled={page === 0}
-              onClick={() => setPage((p) => p - 1)}
+              disabled={currentPage === 0}
+              onClick={() => setPage(Math.max(0, currentPage - 1))}
             >
               <CaretLeft />
             </Button>
             <span className="min-w-[64px] text-center text-xs text-muted-foreground">
-              {page + 1} / {totalPages}
+              {currentPage + 1} / {totalPages}
             </span>
             <Button
               variant="outline"
               size="icon-xs"
-              disabled={page >= totalPages - 1}
-              onClick={() => setPage((p) => p + 1)}
+              disabled={currentPage >= totalPages - 1}
+              onClick={() => setPage(Math.min(totalPages - 1, currentPage + 1))}
             >
               <CaretRight />
             </Button>

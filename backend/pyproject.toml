@@ -12,10 +12,12 @@ dependencies = [
     "beautifulsoup4",
     "playwright",
     "pytest",
+    "httpx",
     "pandas",
     "fastapi",
     "uvicorn[standard]",
     "pydantic",
+    "langgraph",
 ]
 
 [project.optional-dependencies]
@@ -25,6 +27,7 @@ dev = [
 
 [tool.setuptools]
 py-modules = [
+    "agent_runtime",
     "api",
     "scraper",
     "scraper_config",

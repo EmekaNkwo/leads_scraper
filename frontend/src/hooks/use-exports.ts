@@ -2,6 +2,7 @@
 
 import { useCallback } from "react";
 import { useListExportsQuery } from "@/lib/scraper-api";
+import type { AgentRunStatus } from "@/types";
 
 export function useExports() {
   const { data: exports = [], isLoading, refetch } = useListExportsQuery(20);
@@ -12,6 +13,13 @@ export function useExports() {
 
   const downloadJobCsv = useCallback((jobId: string) => {
     window.open(`/api/scrape/${jobId}/csv`, "_blank");
+  }, []);
+
+  const downloadAgentRunCsv = useCallback((run: AgentRunStatus) => {
+    if (!run.scrape_job_id && !run.linked_export_filename) {
+      return;
+    }
+    window.open(`/api/agent/runs/${run.run_id}/csv`, "_blank");
   }, []);
 
   const formatBytes = useCallback((bytes: number) => {
@@ -30,6 +38,7 @@ export function useExports() {
     refetch,
     downloadFile,
     downloadJobCsv,
+    downloadAgentRunCsv,
     formatBytes,
     formatDate,
   };
