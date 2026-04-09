@@ -187,6 +187,17 @@ Current defaults include:
 
 You can either edit `backend/scraper_config.json` or override settings from the CLI and API.
 
+### Clear the dedupe SQLite database
+
+If you want to reset the persistent dedupe store, run:
+
+```bash
+cd frontend
+pnpm clear-sqlite
+```
+
+This removes the configured SQLite dedupe database file plus any SQLite sidecar files such as `-wal` and `-shm`.
+
 ## Common Commands
 
 Helper scripts:
@@ -198,6 +209,7 @@ Helper scripts:
 - `run.bat dev` or `./run.sh dev`: run the frontend dev server
 - `./run.sh stack`: run backend API and frontend together
 - `run.bat test` or `./run.sh test`: run backend tests
+- `cd frontend && pnpm clear-sqlite`: clear the configured dedupe SQLite database
 - `Makefile` targets use `venv/Scripts/python.exe`, so they currently match the Windows venv layout
 
 CLI options:

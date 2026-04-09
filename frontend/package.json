@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "clear-sqlite": "node ./scripts/clear-sqlite.mjs"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
