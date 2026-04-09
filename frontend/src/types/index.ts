@@ -45,6 +45,7 @@ export interface JobStatus {
   status: "pending" | "running" | "completed" | "failed" | "cancelled";
   created_at: string;
   completed_at: string | null;
+  queries: string[];
   queries_total: number;
   queries_done: number;
   results: QueryResult[];
@@ -62,6 +63,9 @@ export interface JobStatus {
   export_retention_minutes: number;
   exports_are_temporary: boolean;
   master_csv_enabled: boolean;
+  combined_csv_filename: string | null;
+  combined_csv_path: string | null;
+  combined_csv_expires_at: string | null;
 }
 
 export interface ScrapeRequest {
@@ -103,4 +107,62 @@ export interface HealthStatus {
 
 export interface DedupeStatus {
   alias_count: number;
+}
+
+export interface AgentRunRequest {
+  goal: string;
+  max_queries: number;
+  max_results_per_query: number;
+  max_scrolls_per_query: number;
+  max_runtime_seconds: number;
+  headless: boolean;
+  enrich_websites: boolean;
+  resume: boolean;
+}
+
+export interface AgentProgress {
+  phase: string;
+  message: string | null;
+  updated_at: string | null;
+}
+
+export interface AgentLeadInsight {
+  name: string;
+  query: string;
+  score: number;
+  email: string;
+  website: string;
+  reasons: string[];
+}
+
+export interface AgentAnalysis {
+  total_leads: number;
+  emails_found: number;
+  websites_found: number;
+  top_leads: AgentLeadInsight[];
+  summary: string;
+}
+
+export interface AgentRunStatus {
+  run_id: string;
+  status:
+    | "pending"
+    | "running"
+    | "cancel_requested"
+    | "completed"
+    | "failed"
+    | "cancelled";
+  created_at: string;
+  completed_at: string | null;
+  goal: string;
+  proposed_queries: string[];
+  scrape_request: Partial<ScrapeRequest> | null;
+  scrape_job_id: string | null;
+  scrape_job_status: JobStatus["status"] | null;
+  linked_export_filename: string | null;
+  linked_export_expires_at: string | null;
+  progress: AgentProgress | null;
+  analysis: AgentAnalysis | null;
+  recent_events: string[];
+  error: string | null;
 }

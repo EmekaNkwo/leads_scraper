@@ -12,6 +12,7 @@ Google Maps leads scraper with a FastAPI backend, Next.js frontend, resumable ch
 - Saves checkpoints so interrupted runs can resume.
 - Supports job history, cancellation, and CSV download from the UI.
 - Exposes a REST API for running and tracking scrape jobs.
+- Includes a lightweight LangGraph-style agent supervisor that can plan queries, run the scraper, and rank results.
 
 ## Stack
 
@@ -226,8 +227,37 @@ CLI options:
 | `GET` | `/scrape/{job_id}` | Get a job by ID |
 | `DELETE` | `/scrape/{job_id}` | Cancel a pending or running job |
 | `GET` | `/scrape/{job_id}/csv` | Download a job CSV |
+| `POST` | `/agent/runs` | Start an agent-supervised scrape run from a natural-language goal |
+| `GET` | `/agent/runs` | List recent agent runs |
+| `GET` | `/agent/runs/{run_id}` | Get an agent run by ID |
+| `GET` | `/agent/runs/{run_id}/csv` | Download the best available CSV for an agent run |
+| `DELETE` | `/agent/runs/{run_id}` | Cancel an agent run and its linked scrape job |
 | `GET` | `/exports` | List recent CSV exports |
 | `GET` | `/exports/{filename}` | Download an export file |
+
+## Agent Supervisor
+
+The lightweight agent path adds a small orchestration layer above the existing scraper:
+
+- Planner: turns a natural-language sourcing goal into multiple Google Maps queries
+- Executor: submits the normal scrape job
+- Monitor: polls the linked scrape job until it finishes or is cancelled
+- Analyst: ranks the returned leads and summarizes the run
+
+Agent runs are persisted as JSON files in `backend/agent_runs/`, and scrape jobs are persisted in `backend/scrape_jobs/`.
+That means linked agent CSV downloads can still be restored after a restart, even if the in-memory job cache was lost.
+
+Example request:
+
+```bash
+curl -X POST http://127.0.0.1:8000/agent/runs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "goal": "Find wholesale electronics suppliers in Ikeja with reachable websites",
+    "max_queries": 4,
+    "max_results_per_query": 20
+  }'
+```
 
 ## Output Files
 
