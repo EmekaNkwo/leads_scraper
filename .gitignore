@@ -26,7 +26,11 @@ backend/csv_exports/*.csv
 backend/csv_exports/*.json
 backend/csv_exports/archive/
 backend/verification_exports*/
+backend/agent_runs/
+backend/scrape_jobs/
 
 # Frontend
 frontend/node_modules/
 frontend/.next/
+
+
