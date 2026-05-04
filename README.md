@@ -2,7 +2,7 @@
 
 Google Maps leads scraper with a FastAPI backend, Next.js frontend, resumable checkpoints, CSV exports, and optional website enrichment.
 
-![Leads Scraper Dashboard](demo.png)
+![Leads Scraper Dashboard](image.png)
 
 ## What It Does
 
