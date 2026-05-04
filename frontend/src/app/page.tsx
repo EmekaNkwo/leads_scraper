@@ -1,12 +1,10 @@
 "use client";
 
-import { Header } from "@/components/header";
-import { ScrapeForm } from "@/components/scrape-form";
-import { JobTracker } from "@/components/job-tracker";
-import { LeadsTable } from "@/components/leads-table";
-import { ExportsList } from "@/components/exports-list";
-import { JobsHistory } from "@/components/jobs-history";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { TopTape } from "@/components/top-tape";
+import { RunConsole } from "@/components/run-console";
+import { ActiveRun } from "@/components/active-run";
+import { OutputPanel } from "@/components/output-panel";
+import { HistoryRail } from "@/components/history-rail";
 import { useScraper } from "@/hooks/use-scraper";
 import { useExports } from "@/hooks/use-exports";
 
@@ -18,15 +16,19 @@ export default function Dashboard() {
     setQueries,
     submit,
     isSubmitting,
-    activeJob,
-    activeJobId,
-    isRunning,
+    submitError,
+    viewedJob,
+    viewedJobId,
+    isViewedRunning,
+    isAnyJobRunning,
     elapsed,
     formatElapsed,
     jobs,
     viewJob,
     cancelJob,
+    cancelViewedJob,
     cancellingJobId,
+    runStateLabel,
   } = useScraper();
 
   const {
@@ -41,82 +43,66 @@ export default function Dashboard() {
 
   return (
     <div className="flex flex-1 flex-col">
-      <Header />
+      <TopTape runState={runStateLabel} />
 
-      <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 p-6">
-        <div className="grid gap-6 lg:grid-cols-[380px_minmax(0,1fr)]">
-          {/* Left column: form + job history */}
-          <div className="flex min-w-0 flex-col gap-6">
-            <ScrapeForm
-              form={form}
-              queriesText={queriesText}
-              isSubmitting={isSubmitting}
-              isRunning={isRunning}
-              onUpdateForm={updateForm}
-              onSetQueries={setQueries}
-              onSubmit={submit}
-            />
-            <JobsHistory
-              jobs={jobs}
-              activeJobId={activeJobId}
-              onViewJob={viewJob}
-              onCancelJob={cancelJob}
-              cancellingJobId={cancellingJobId}
-            />
-          </div>
+      <main className="animate-fade-in mx-auto flex w-full max-w-[1320px] flex-1 flex-col gap-6 px-5 py-6 sm:px-8">
+        <RunConsole
+          form={form}
+          queriesText={queriesText}
+          isSubmitting={isSubmitting}
+          isRunning={isAnyJobRunning}
+          submitError={submitError}
+          onUpdateForm={updateForm}
+          onSetQueries={setQueries}
+          onSubmit={submit}
+        />
 
-          {/* Right column: status + results/exports tabs */}
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
           <div className="flex min-w-0 flex-col gap-6">
-            <JobTracker
-              job={activeJob}
-              onDownloadCsv={downloadJobCsv}
-              isRunning={isRunning}
+            <ActiveRun
+              job={viewedJob}
+              isRunning={isViewedRunning}
+              cancelling={
+                viewedJob ? cancellingJobId === viewedJob.job_id : false
+              }
               elapsed={elapsed}
               formatElapsed={formatElapsed}
+              onDownloadCsv={downloadJobCsv}
+              onCancel={cancelViewedJob}
             />
 
-            <Tabs defaultValue="results">
-              <TabsList>
-                <TabsTrigger value="results">
-                  Results
-                  {activeJob && activeJob.leads.length > 0 && (
-                    <span className="ml-1.5 rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold text-primary-foreground">
-                      {activeJob.leads.length}
-                    </span>
-                  )}
-                </TabsTrigger>
-                <TabsTrigger value="exports">
-                  Exports
-                  {exports.length > 0 && (
-                    <span className="ml-1.5 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-semibold">
-                      {exports.length}
-                    </span>
-                  )}
-                </TabsTrigger>
-              </TabsList>
-
-              <TabsContent value="results" className="mt-4">
-                <LeadsTable
-                  leads={activeJob?.leads ?? []}
-                  jobId={activeJobId}
-                  onDownloadCsv={downloadJobCsv}
-                />
-              </TabsContent>
-
-              <TabsContent value="exports" className="mt-4">
-                <ExportsList
-                  exports={exports}
-                  isLoading={exportsLoading}
-                  onRefresh={refetchExports}
-                  onDownload={downloadFile}
-                  formatBytes={formatBytes}
-                  formatDate={formatDate}
-                />
-              </TabsContent>
-            </Tabs>
+            <OutputPanel
+              job={viewedJob}
+              exports={exports}
+              exportsLoading={exportsLoading}
+              onRefreshExports={refetchExports}
+              onDownloadJobCsv={downloadJobCsv}
+              onDownloadFile={downloadFile}
+              formatBytes={formatBytes}
+              formatDate={formatDate}
+            />
           </div>
+
+          <HistoryRail
+            jobs={jobs}
+            viewedJobId={viewedJobId}
+            onViewJob={viewJob}
+            onCancelJob={cancelJob}
+            cancellingJobId={cancellingJobId}
+          />
         </div>
       </main>
+
+      <footer className="border-t border-border/60 px-5 py-4 sm:px-8">
+        <div className="mx-auto flex max-w-[1320px] items-center justify-between gap-4">
+          <span className="font-mono text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+            LEADS · SCRAPER
+          </span>
+          <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-muted-foreground/80">
+            v1 · Console
+          </span>
+        </div>
+      </footer>
     </div>
   );
 }

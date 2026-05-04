@@ -45,6 +45,7 @@ export interface JobStatus {
   status: "pending" | "running" | "completed" | "failed" | "cancelled";
   created_at: string;
   completed_at: string | null;
+  queries: string[];
   queries_total: number;
   queries_done: number;
   results: QueryResult[];

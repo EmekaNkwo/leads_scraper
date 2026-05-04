@@ -3,15 +3,34 @@
 import { useCallback } from "react";
 import { useListExportsQuery } from "@/lib/scraper-api";
 
+function triggerDownload(href: string, filename?: string) {
+  const link = document.createElement("a");
+  link.href = href;
+  if (filename) link.download = filename;
+  link.target = "_blank";
+  link.rel = "noopener";
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
+
 export function useExports() {
-  const { data: exports = [], isLoading, refetch } = useListExportsQuery(20);
+  const {
+    data: exports = [],
+    isLoading,
+    isFetching,
+    refetch,
+  } = useListExportsQuery(20);
 
   const downloadFile = useCallback((filename: string) => {
-    window.open(`/api/exports/${encodeURIComponent(filename)}`, "_blank");
+    triggerDownload(`/api/exports/${encodeURIComponent(filename)}`, filename);
   }, []);
 
   const downloadJobCsv = useCallback((jobId: string) => {
-    window.open(`/api/scrape/${jobId}/csv`, "_blank");
+    triggerDownload(
+      `/api/scrape/${jobId}/csv`,
+      `leads_${jobId}.csv`,
+    );
   }, []);
 
   const formatBytes = useCallback((bytes: number) => {
@@ -26,7 +45,7 @@ export function useExports() {
 
   return {
     exports,
-    isLoading,
+    isLoading: isLoading || isFetching,
     refetch,
     downloadFile,
     downloadJobCsv,

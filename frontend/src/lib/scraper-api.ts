@@ -27,13 +27,14 @@ export const scraperApi = createApi({
 
     startScrape: builder.mutation<JobStatus, ScrapeRequest>({
       query: (body) => ({ url: "/scrape", method: "POST", body }),
-      invalidatesTags: ["Jobs"],
+      invalidatesTags: ["Jobs", "Exports"],
     }),
 
     cancelScrape: builder.mutation<JobStatus, string>({
       query: (jobId) => ({ url: `/scrape/${jobId}`, method: "DELETE" }),
       invalidatesTags: (_result, _err, jobId) => [
         "Jobs",
+        "Exports",
         { type: "Jobs", id: jobId },
       ],
     }),
